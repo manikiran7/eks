@@ -19,16 +19,16 @@ provider "aws" {
 variable "vpc_id" {
   description = "VPC ID to deploy resources into"
   type        = string
-  default     = "vpc-0ddd4652ed3ab0f93"
+  default     = "vpc-07e2c0fa4f06f6be6"
 }
 
 variable "public_subnet_ids" {
   description = "List of public subnets used for Jenkins"
   type        = list(string)
   default     = [
-    "subnet-05b21b389824313c9",
-    "subnet-00d638cb30a394d23",
-    "subnet-0e8da55dcbd31c37a"
+    "subnet-07163cbe46ebd2e36",
+  "subnet-0a8dac1a63e9aff30",
+  "subnet-038a7d7c3a1e9725c"
   ]
 }
 
@@ -36,9 +36,9 @@ variable "private_subnet_ids" {
   description = "List of private subnets used for EKS admin node"
   type        = list(string)
   default     = [
-    "subnet-0606b4c79397af066",
-    "subnet-055ed29a53cc6f390",
-    "subnet-05b5dcccb50e8fa7f"
+     "subnet-0212cd57c2ff6e896",
+  "subnet-08a4d130dd2e4db3e",
+  "subnet-0d656561839fdc133"
   ]
 }
 
