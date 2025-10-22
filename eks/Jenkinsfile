@@ -8,13 +8,13 @@ pipeline {
 
   environment {
     AWS_REGION = 'us-east-1'
-    PRIVATE_INSTANCE_ID = '10.100.0.139'  // Replace with your private EC2 instance ID
+    PRIVATE_INSTANCE_ID = '10.100.0.139' // Replace with your private EC2 instance ID
     GIT_REPO = 'git@github.com:manikiran7/eks.git'
-    REPO_DIR = '/opt/deployments/infra'
+    BASE_DIR = '/opt/deployments/infra'
+    TERRAFORM_DIR = '/opt/deployments/infra/eks/eks'
   }
 
   stages {
-
     stage('Deploy via Private EC2') {
       steps {
         echo "🚀 Starting Terraform deploy for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
@@ -27,23 +27,23 @@ pipeline {
             --comment "Terraform deploy for ${params.SERVICE_NAME}:${params.IMAGE_TAG}" \
             --parameters 'commands=[
               "set -e",
-              "sudo mkdir -p /opt/deployments",
-              "cd /opt/deployments",
-              "if [ ! -d ${REPO_DIR} ]; then",
-              "  echo Cloning fresh repo...",
+              "sudo mkdir -p ${BASE_DIR}",
+              "cd ${BASE_DIR}",
+              "if [ ! -d infra ]; then",
+              "  echo Cloning repo first time...",
               "  sudo git clone ${GIT_REPO} infra",
               "else",
-              "  echo Pulling latest changes...",
-              "  cd ${REPO_DIR}",
+              "  echo Pulling latest code...",
+              "  cd infra",
               "  sudo git fetch --all --prune",
               "  sudo git reset --hard origin/main",
               "fi",
-              "cd ${REPO_DIR}",
-              "echo Terraform init...",
+              "cd ${TERRAFORM_DIR}",
+              "echo Running terraform init...",
               "terraform init -input=false",
-              "echo Terraform apply for ${params.SERVICE_NAME}:${params.IMAGE_TAG}...",
+              "echo Applying Terraform with service ${params.SERVICE_NAME}:${params.IMAGE_TAG}...",
               "terraform apply -auto-approve -var=\\\"services={\\\\\\\"${params.SERVICE_NAME}\\\\\\\"={image_tag=\\\\\\\"${params.IMAGE_TAG}\\\\\\\",port=8080,replicas=2,path=\\\\\\\"/${params.SERVICE_NAME}\\\\\\\"}}\\\"",
-              "echo ✅ Deployment done for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
+              "echo ✅ Terraform deployment complete for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
             ]'
         """
       }
