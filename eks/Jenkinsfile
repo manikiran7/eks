@@ -8,7 +8,7 @@ pipeline {
 
   environment {
     AWS_REGION = 'us-east-1'
-    PRIVATE_INSTANCE_ID = 'i-0d2bac237c43eb9db'   // your private EC2
+    PRIVATE_INSTANCE_ID = 'i-0d2bac237c43eb9db'
     GIT_REPO = 'git@github.com:manikiran7/eks.git'
     BASE_DIR = '/opt/deployments'
     REPO_DIR = '/opt/deployments/infra'
@@ -21,7 +21,6 @@ pipeline {
         echo "🚀 Starting Terraform deploy for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
 
         script {
-          // 🔹 Send the SSM command to private EC2
           def commandId = sh(
             script: """
               aws ssm send-command \
@@ -35,11 +34,17 @@ pipeline {
                   "sudo mkdir -p ${BASE_DIR}",
                   "cd ${BASE_DIR}",
                   "if [ -d ${REPO_DIR} ]; then",
-                  "  echo Cleaning existing repo folder to avoid nested clone...",
+                  "  echo Cleaning existing repo folder...",
                   "  sudo rm -rf ${REPO_DIR}",
                   "fi",
                   "echo ==== CLONING REPOSITORY ====",
                   "sudo git clone ${GIT_REPO} ${REPO_DIR}",
+                  "if [ ! -d ${TERRAFORM_DIR} ]; then",
+                  "  echo '❌ ERROR: Terraform path not found at ${TERRAFORM_DIR}'",
+                  "  echo 'Repo structure:'",
+                  "  ls -R ${REPO_DIR} || true",
+                  "  exit 2",
+                  "fi",
                   "cd ${TERRAFORM_DIR}",
                   "echo ==== TERRAFORM INIT ====",
                   "terraform init -input=false",
@@ -53,17 +58,9 @@ pipeline {
             returnStdout: true
           ).trim()
 
-          echo "🕓 Waiting for Terraform execution to complete (SSM Command ID: ${commandId})"
+          echo "🕓 Waiting for Terraform execution (Command ID: ${commandId})"
+          sh "aws ssm wait command-executed --command-id ${commandId} --instance-id ${PRIVATE_INSTANCE_ID} --region ${AWS_REGION}"
 
-          // 🔹 Wait for the command to finish
-          sh """
-            aws ssm wait command-executed \
-              --command-id ${commandId} \
-              --instance-id ${PRIVATE_INSTANCE_ID} \
-              --region ${AWS_REGION}
-          """
-
-          // 🔹 Fetch and print Terraform output
           echo "📜 Terraform Output:"
           sh """
             aws ssm get-command-invocation \
@@ -80,10 +77,10 @@ pipeline {
 
   post {
     success {
-      echo "✅ Terraform + EKS deployment successful for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
+      echo "✅ Terraform deployment succeeded for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
     }
     failure {
-      echo "❌ Deployment failed. Check Jenkins logs or SSM Run Command output in AWS Console."
+      echo "❌ Terraform deployment failed — check Jenkins logs or SSM output."
     }
   }
 }
