@@ -8,9 +8,10 @@ pipeline {
 
   environment {
     AWS_REGION = 'us-east-1'
-    PRIVATE_INSTANCE_ID = 'i-0d2bac237c43eb9db' // Replace with your private EC2 instance ID
+    PRIVATE_INSTANCE_ID = 'i-0d2bac237c43eb9db'   // your private EC2
     GIT_REPO = 'git@github.com:manikiran7/eks.git'
-    BASE_DIR = '/opt/deployments/infra'
+    BASE_DIR = '/opt/deployments'
+    REPO_DIR = '/opt/deployments/infra'
     TERRAFORM_DIR = '/opt/deployments/infra/eks/eks'
   }
 
@@ -19,43 +20,70 @@ pipeline {
       steps {
         echo "🚀 Starting Terraform deploy for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
 
-        sh """
-          aws ssm send-command \
-            --instance-ids "${PRIVATE_INSTANCE_ID}" \
-            --document-name "AWS-RunShellScript" \
-            --region ${AWS_REGION} \
-            --comment "Terraform deploy for ${params.SERVICE_NAME}:${params.IMAGE_TAG}" \
-            --parameters 'commands=[
-              "set -e",
-              "sudo mkdir -p ${BASE_DIR}",
-              "cd ${BASE_DIR}",
-              "if [ ! -d infra ]; then",
-              "  echo Cloning repo first time...",
-              "  sudo git clone ${GIT_REPO} infra",
-              "else",
-              "  echo Pulling latest code...",
-              "  cd infra",
-              "  sudo git fetch --all --prune",
-              "  sudo git reset --hard origin/main",
-              "fi",
-              "cd ${TERRAFORM_DIR}",
-              "echo Running terraform init...",
-              "terraform init -input=false",
-              "echo Applying Terraform with service ${params.SERVICE_NAME}:${params.IMAGE_TAG}...",
-              "terraform apply -auto-approve -var=\\\"services={\\\\\\\"${params.SERVICE_NAME}\\\\\\\"={image_tag=\\\\\\\"${params.IMAGE_TAG}\\\\\\\",port=8080,replicas=2,path=\\\\\\\"/${params.SERVICE_NAME}\\\\\\\"}}\\\"",
-              "echo ✅ Terraform deployment complete for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
-            ]'
-        """
+        script {
+          // 🔹 Send the SSM command to private EC2
+          def commandId = sh(
+            script: """
+              aws ssm send-command \
+                --instance-ids "${PRIVATE_INSTANCE_ID}" \
+                --document-name "AWS-RunShellScript" \
+                --region ${AWS_REGION} \
+                --comment "Terraform deploy for ${params.SERVICE_NAME}:${params.IMAGE_TAG}" \
+                --parameters 'commands=[
+                  "set -e",
+                  "echo ==== PREPARING REPO DIRECTORY ====",
+                  "sudo mkdir -p ${BASE_DIR}",
+                  "cd ${BASE_DIR}",
+                  "if [ -d ${REPO_DIR} ]; then",
+                  "  echo Cleaning existing repo folder to avoid nested clone...",
+                  "  sudo rm -rf ${REPO_DIR}",
+                  "fi",
+                  "echo ==== CLONING REPOSITORY ====",
+                  "sudo git clone ${GIT_REPO} ${REPO_DIR}",
+                  "cd ${TERRAFORM_DIR}",
+                  "echo ==== TERRAFORM INIT ====",
+                  "terraform init -input=false",
+                  "echo ==== TERRAFORM APPLY ====",
+                  "terraform apply -auto-approve -var=\\\"services={\\\\\\\"${params.SERVICE_NAME}\\\\\\\"={image_tag=\\\\\\\"${params.IMAGE_TAG}\\\\\\\",port=8080,replicas=2,path=\\\\\\\"/${params.SERVICE_NAME}\\\\\\\"}}\\\"",
+                  "echo ==== ✅ Terraform deployment complete for ${params.SERVICE_NAME}:${params.IMAGE_TAG} ===="
+                ]' \
+                --query 'Command.CommandId' \
+                --output text
+            """,
+            returnStdout: true
+          ).trim()
+
+          echo "🕓 Waiting for Terraform execution to complete (SSM Command ID: ${commandId})"
+
+          // 🔹 Wait for the command to finish
+          sh """
+            aws ssm wait command-executed \
+              --command-id ${commandId} \
+              --instance-id ${PRIVATE_INSTANCE_ID} \
+              --region ${AWS_REGION}
+          """
+
+          // 🔹 Fetch and print Terraform output
+          echo "📜 Terraform Output:"
+          sh """
+            aws ssm get-command-invocation \
+              --command-id ${commandId} \
+              --instance-id ${PRIVATE_INSTANCE_ID} \
+              --region ${AWS_REGION} \
+              --query 'StandardOutputContent' \
+              --output text || true
+          """
+        }
       }
     }
   }
 
   post {
     success {
-      echo "✅ Terraform applied successfully for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
+      echo "✅ Terraform + EKS deployment successful for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
     }
     failure {
-      echo "❌ Deployment failed. Check SSM Run Command output in AWS Console."
+      echo "❌ Deployment failed. Check Jenkins logs or SSM Run Command output in AWS Console."
     }
   }
 }
