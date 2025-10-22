@@ -49,7 +49,7 @@ pipeline {
                   "echo ==== TERRAFORM INIT ====",
                   "terraform init -input=false",
                   "echo ==== TERRAFORM APPLY ====",
-                  "terraform apply -auto-approve -var=\\\"services={\\\\\\\"${params.SERVICE_NAME}\\\\\\\"={image_tag=\\\\\\\"${params.IMAGE_TAG}\\\\\\\",port=8080,replicas=2,path=\\\\\\\"/${params.SERVICE_NAME}\\\\\\\"}}\\\"",
+"terraform apply -auto-approve -var=\\\"services={\\\\\\\"${params.SERVICE_NAME}\\\\\\\"={image_tag=\\\\\\\"${params.IMAGE_TAG}\\\\\\\",port=8080,replicas=2,min_replicas=2,max_replicas=6,path=\\\\\\\"/${params.SERVICE_NAME}\\\\\\\"}}\\\"",
                   "echo ==== ✅ Terraform deployment complete for ${params.SERVICE_NAME}:${params.IMAGE_TAG} ===="
                 ]' \
                 --query 'Command.CommandId' \
