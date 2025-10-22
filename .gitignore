@@ -10,3 +10,5 @@
 # Credentials / keys
 *.pem
 *.key
+.terraform/
+.terraform.lock.hcl
