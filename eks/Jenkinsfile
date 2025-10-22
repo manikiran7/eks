@@ -8,7 +8,7 @@ pipeline {
 
   environment {
     AWS_REGION = 'us-east-1'
-    PRIVATE_INSTANCE_ID = '10.100.0.139' // Replace with your private EC2 instance ID
+    PRIVATE_INSTANCE_ID = 'i-0d2bac237c43eb9db' // Replace with your private EC2 instance ID
     GIT_REPO = 'git@github.com:manikiran7/eks.git'
     BASE_DIR = '/opt/deployments/infra'
     TERRAFORM_DIR = '/opt/deployments/infra/eks/eks'
