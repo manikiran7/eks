@@ -1,0 +1,61 @@
+pipeline {
+  agent any
+
+  parameters {
+    string(name: 'SERVICE_NAME', description: 'Service name to deploy')
+    string(name: 'IMAGE_TAG', description: 'Docker image tag to deploy')
+  }
+
+  environment {
+    AWS_REGION = 'us-east-1'
+    PRIVATE_INSTANCE_ID = '10.100.0.139'  // Replace with your private EC2 instance ID
+    GIT_REPO = 'git@github.com:manikiran7/eks.git'
+    REPO_DIR = '/opt/deployments/infra'
+  }
+
+  stages {
+
+    stage('Deploy via Private EC2') {
+      steps {
+        echo "🚀 Starting Terraform deploy for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
+
+        sh """
+          aws ssm send-command \
+            --instance-ids "${PRIVATE_INSTANCE_ID}" \
+            --document-name "AWS-RunShellScript" \
+            --region ${AWS_REGION} \
+            --comment "Terraform deploy for ${params.SERVICE_NAME}:${params.IMAGE_TAG}" \
+            --parameters 'commands=[
+              "set -e",
+              "sudo mkdir -p /opt/deployments",
+              "cd /opt/deployments",
+              "if [ ! -d ${REPO_DIR} ]; then",
+              "  echo Cloning fresh repo...",
+              "  sudo git clone ${GIT_REPO} infra",
+              "else",
+              "  echo Pulling latest changes...",
+              "  cd ${REPO_DIR}",
+              "  sudo git fetch --all --prune",
+              "  sudo git reset --hard origin/main",
+              "fi",
+              "cd ${REPO_DIR}",
+              "echo Terraform init...",
+              "terraform init -input=false",
+              "echo Terraform apply for ${params.SERVICE_NAME}:${params.IMAGE_TAG}...",
+              "terraform apply -auto-approve -var=\\\"services={\\\\\\\"${params.SERVICE_NAME}\\\\\\\"={image_tag=\\\\\\\"${params.IMAGE_TAG}\\\\\\\",port=8080,replicas=2,path=\\\\\\\"/${params.SERVICE_NAME}\\\\\\\"}}\\\"",
+              "echo ✅ Deployment done for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
+            ]'
+        """
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "✅ Terraform applied successfully for ${params.SERVICE_NAME}:${params.IMAGE_TAG}"
+    }
+    failure {
+      echo "❌ Deployment failed. Check SSM Run Command output in AWS Console."
+    }
+  }
+}
