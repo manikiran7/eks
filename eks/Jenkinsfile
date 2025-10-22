@@ -12,7 +12,7 @@ pipeline {
     GIT_REPO = 'git@github.com:manikiran7/eks.git'
     BASE_DIR = '/opt/deployments'
     REPO_DIR = '/opt/deployments/infra'
-    TERRAFORM_DIR = '/opt/deployments/infra/eks/eks'
+    TERRAFORM_DIR = '/opt/deployments/infra/eks'  // ✅ FIXED PATH
   }
 
   stages {
