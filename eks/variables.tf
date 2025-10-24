@@ -13,16 +13,16 @@ variable "region" {
 variable "vpc_id" {
   description = "VPC ID to deploy EKS into"
   type        = string
-  default     = "vpc-07e2c0fa4f06f6be6"
+  default     = "vpc-0e6ab837a848c0d64"
 }
 
 variable "public_subnet_ids" {
   description = "List of public subnets used for ALB / public resources"
   type        = list(string)
   default     = [
-     "subnet-07163cbe46ebd2e36",
-  "subnet-0a8dac1a63e9aff30",
-  "subnet-038a7d7c3a1e9725c"
+     "subnet-00c9e347cb13998b2",
+  "subnet-0f429bfe146c109bd",
+  "subnet-0e6c2d023a95e9e91"
   ]
 }
 
@@ -30,9 +30,9 @@ variable "private_subnet_ids" {
   description = "List of private subnets used for workloads and pods"
   type        = list(string)
   default     = [
- "subnet-0212cd57c2ff6e896",
-  "subnet-08a4d130dd2e4db3e",
-  "subnet-0d656561839fdc133"
+ "subnet-044605d196176916c",
+  "subnet-02070e0943e29a127",
+  "subnet-0b7e56131574a5164"
   ]
 }
 

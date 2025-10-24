@@ -31,6 +31,12 @@ variable "az_count" {
   default = 3
 }
 
+variable "enable_vpc_endpoints" {
+  type    = bool
+  default = false
+  description = "Enable private VPC endpoints for AWS services (optional security enhancement)"
+}
+
 provider "aws" {
   region = var.region
 }
@@ -49,7 +55,9 @@ resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = { Name = "${var.name_prefix}-vpc" }
+  tags = {
+    Name = "${var.name_prefix}-vpc"
+  }
 }
 
 #########################
@@ -69,9 +77,11 @@ resource "aws_subnet" "public" {
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index + 100)
   availability_zone       = data.aws_availability_zones.available.names[count.index]
   map_public_ip_on_launch = true
+
   tags = {
-    Name                     = "${var.name_prefix}-public-${count.index}"
-    "kubernetes.io/role/elb" = "1"
+    Name                                     = "${var.name_prefix}-public-${count.index}"
+    "kubernetes.io/role/elb"                 = "1"
+    "kubernetes.io/cluster/${var.name_prefix}-eks" = "shared"
   }
 }
 
@@ -83,9 +93,11 @@ resource "aws_subnet" "private" {
   vpc_id            = aws_vpc.main.id
   cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index)
   availability_zone = data.aws_availability_zones.available.names[count.index]
+
   tags = {
-    Name                              = "${var.name_prefix}-private-${count.index}"
-    "kubernetes.io/role/internal-elb" = "1"
+    Name                                      = "${var.name_prefix}-private-${count.index}"
+    "kubernetes.io/role/internal-elb"         = "1"
+    "kubernetes.io/cluster/${var.name_prefix}-eks" = "shared"
   }
 }
 
@@ -93,8 +105,10 @@ resource "aws_subnet" "private" {
 # NAT Gateways (one per AZ)
 #########################
 resource "aws_eip" "nat" {
-  count = var.az_count
-  tags  = { Name = "${var.name_prefix}-nat-eip-${count.index}" }
+  count      = var.az_count
+  domain     = "vpc"
+  depends_on = [aws_internet_gateway.igw]
+  tags       = { Name = "${var.name_prefix}-nat-eip-${count.index}" }
 }
 
 resource "aws_nat_gateway" "nat" {
@@ -142,6 +156,38 @@ resource "aws_route_table_association" "private_assoc" {
 }
 
 #########################
+# (Optional) VPC Interface Endpoints
+#########################
+resource "aws_vpc_endpoint" "ecr_api" {
+  count             = var.enable_vpc_endpoints ? 1 : 0
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.region}.ecr.api"
+  vpc_endpoint_type = "Interface"
+  subnet_ids        = aws_subnet.private[*].id
+  private_dns_enabled = true
+  tags = { Name = "${var.name_prefix}-ecr-api-endpoint" }
+}
+
+resource "aws_vpc_endpoint" "ecr_dkr" {
+  count             = var.enable_vpc_endpoints ? 1 : 0
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.region}.ecr.dkr"
+  vpc_endpoint_type = "Interface"
+  subnet_ids        = aws_subnet.private[*].id
+  private_dns_enabled = true
+  tags = { Name = "${var.name_prefix}-ecr-dkr-endpoint" }
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  count             = var.enable_vpc_endpoints ? 1 : 0
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = aws_route_table.private[*].id
+  tags = { Name = "${var.name_prefix}-s3-endpoint" }
+}
+
+#########################
 # Outputs
 #########################
 output "vpc_id" {
@@ -162,4 +208,9 @@ output "private_subnet_ids" {
 output "nat_gateway_ids" {
   value       = aws_nat_gateway.nat[*].id
   description = "NAT gateway IDs"
+}
+
+output "nat_eip_public_ips" {
+  value       = aws_eip.nat[*].public_ip
+  description = "Public Elastic IPs for NAT gateways (for whitelisting EKS or Jenkins)"
 }

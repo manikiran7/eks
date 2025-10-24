@@ -14,43 +14,34 @@ provider "aws" {
 }
 
 ###################################################
-# VARIABLES (with defaults)
+# VARIABLES
 ###################################################
 variable "vpc_id" {
-  description = "VPC ID to deploy resources into"
   type        = string
-  default     = "vpc-07e2c0fa4f06f6be6"
+  description = "VPC ID where EC2 will be launched"
+  default     = "vpc-01445306434f31b95"
 }
 
 variable "public_subnet_ids" {
-  description = "List of public subnets used for Jenkins"
   type        = list(string)
+  description = "List of public subnets for Jenkins EC2"
   default     = [
-    "subnet-07163cbe46ebd2e36",
-  "subnet-0a8dac1a63e9aff30",
-  "subnet-038a7d7c3a1e9725c"
-  ]
-}
-
-variable "private_subnet_ids" {
-  description = "List of private subnets used for EKS admin node"
-  type        = list(string)
-  default     = [
-     "subnet-0212cd57c2ff6e896",
-  "subnet-08a4d130dd2e4db3e",
-  "subnet-0d656561839fdc133"
+    "subnet-03ca852daae422e1c",
+    "subnet-0d65a06dc480bb19f",
+    "subnet-0f4db8d4112d46229"
   ]
 }
 
 ###################################################
-# SECURITY GROUPS
+# SECURITY GROUP
 ###################################################
 resource "aws_security_group" "jenkins_sg" {
-  name        = "jenkins-public-sg"
-  description = "Allow SSH and Jenkins UI"
+  name        = "jenkins-sg"
+  description = "Allow SSH and Jenkins UI access"
   vpc_id      = var.vpc_id
 
   ingress {
+    description = "SSH access"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -58,6 +49,7 @@ resource "aws_security_group" "jenkins_sg" {
   }
 
   ingress {
+    description = "Jenkins UI"
     from_port   = 8080
     to_port     = 8080
     protocol    = "tcp"
@@ -72,40 +64,16 @@ resource "aws_security_group" "jenkins_sg" {
   }
 
   tags = {
-    Name = "jenkins-public-sg"
-  }
-}
-
-resource "aws_security_group" "eks_admin_sg" {
-  name        = "eks-admin-private-sg"
-  description = "Allow SSH from Jenkins and access to EKS"
-  vpc_id      = var.vpc_id
-
-  ingress {
-    description     = "Allow SSH from Jenkins"
-    from_port       = 22
-    to_port         = 22
-    protocol        = "tcp"
-    security_groups = [aws_security_group.jenkins_sg.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "eks-admin-sg"
+    Name = "jenkins-sg"
   }
 }
 
 ###################################################
-# IAM ROLES AND INSTANCE PROFILES
+# IAM ROLE + INSTANCE PROFILE
 ###################################################
 resource "aws_iam_role" "jenkins_role" {
   name = "jenkins-ec2-role"
+
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
     Statement = [{
@@ -116,6 +84,7 @@ resource "aws_iam_role" "jenkins_role" {
   })
 }
 
+# Full permissions for Jenkins to manage AWS (EKS, EC2, S3, etc.)
 resource "aws_iam_role_policy_attachment" "jenkins_admin_policy" {
   role       = aws_iam_role.jenkins_role.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
@@ -126,45 +95,27 @@ resource "aws_iam_instance_profile" "jenkins_profile" {
   role = aws_iam_role.jenkins_role.name
 }
 
-resource "aws_iam_role" "eks_admin_role" {
-  name = "eks-admin-ec2-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Effect = "Allow",
-      Principal = { Service = "ec2.amazonaws.com" },
-      Action    = "sts:AssumeRole"
-    }]
-  })
-}
-
-# Grant full AWS admin access (includes ECR, EKS, Terraform S3, etc.)
-resource "aws_iam_role_policy_attachment" "eks_admin_policy" {
-  role       = aws_iam_role.eks_admin_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
-}
-
-resource "aws_iam_instance_profile" "eks_admin_profile" {
-  name = "eks-admin-instance-profile"
-  role = aws_iam_role.eks_admin_role.name
-}
-
 ###################################################
-# PUBLIC EC2 - JENKINS SERVER
+# SINGLE EC2 INSTANCE (Jenkins + EKS Tools)
 ###################################################
 resource "aws_instance" "jenkins_server" {
-  ami                         = "ami-0c7217cdde317cfec" # Ubuntu 22.04
+  ami                         = "ami-0c7217cdde317cfec" # Ubuntu 22.04 LTS
   instance_type               = "t2.medium"
   subnet_id                   = var.public_subnet_ids[0]
   vpc_security_group_ids      = [aws_security_group.jenkins_sg.id]
   associate_public_ip_address = true
   iam_instance_profile        = aws_iam_instance_profile.jenkins_profile.name
-  key_name                    = "mani"   # Use existing AWS key pair
+  key_name                    = "mani"
 
   user_data = <<-EOF
     #!/bin/bash
     set -e
     apt update -y
+
+    # Install essentials
+    apt install -y fontconfig openjdk-21-jre git awscli unzip curl jq python3-pip gnupg software-properties-common
+
+    # Install Jenkins
     apt install -y fontconfig openjdk-21-jre git awscli unzip
     mkdir -p /etc/apt/keyrings
     wget -O /etc/apt/keyrings/jenkins-keyring.asc https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
@@ -173,31 +124,6 @@ resource "aws_instance" "jenkins_server" {
     apt install -y jenkins
     systemctl enable jenkins
     systemctl start jenkins
-  EOF
-
-  tags = {
-    Name = "Jenkins-Public-EC2"
-  }
-}
-
-###################################################
-# PRIVATE EC2 - EKS ADMIN NODE
-###################################################
-resource "aws_instance" "eks_admin_server" {
-  ami                    = "ami-0c7217cdde317cfec" # Ubuntu 22.04
-  instance_type          = "t2.medium"
-  subnet_id              = var.private_subnet_ids[0]
-  vpc_security_group_ids = [aws_security_group.eks_admin_sg.id]
-  iam_instance_profile   = aws_iam_instance_profile.eks_admin_profile.name
-  key_name               = "mani"
-  associate_public_ip_address = false
-
-  user_data = <<-EOF
-    #!/bin/bash
-    set -e
-    apt update -y
-    apt install -y curl unzip python3-pip jq git
-    pip install awscli --upgrade
 
     # Install kubectl
     curl -o kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-07-18/bin/linux/amd64/kubectl
@@ -208,21 +134,15 @@ resource "aws_instance" "eks_admin_server" {
     mv /tmp/eksctl /usr/local/bin
 
     # Install Terraform
-    apt install -y gnupg software-properties-common
     wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
     echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list
     apt update -y && apt install -y terraform
 
-    # Verify installations
-    aws --version
-    kubectl version --client
-    eksctl version
-    terraform version
-    echo "✅ Installed awscli, kubectl, eksctl, terraform"
+    echo "✅ Jenkins + Terraform + eksctl + kubectl installed successfully!"
   EOF
 
   tags = {
-    Name = "Private-EKS-Admin-EC2"
+    Name = "Jenkins-EKS-Server"
   }
 }
 
@@ -237,10 +157,6 @@ output "jenkins_url" {
   value = "http://${aws_instance.jenkins_server.public_dns}:8080"
 }
 
-output "private_eks_admin_ip" {
-  value = aws_instance.eks_admin_server.private_ip
-}
-
-output "ssh_from_jenkins_to_private" {
-  value = "ssh -i mani.pem ubuntu@${aws_instance.eks_admin_server.private_ip}"
+output "ssh_command" {
+  value = "ssh -i mani.pem ubuntu@${aws_instance.jenkins_server.public_ip}"
 }
