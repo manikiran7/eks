@@ -1,5 +1,16 @@
+###################################################
+# TERRAFORM BACKEND + PROVIDER
+###################################################
 terraform {
   required_version = ">= 1.2.0"
+
+  backend "s3" {
+    bucket         = "my-terraform-state-prod-manikiran"
+    key            = "ec2/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "terraform-lock-table"
+    encrypt        = true
+  }
 
   required_providers {
     aws = {
@@ -18,17 +29,15 @@ provider "aws" {
 ###################################################
 variable "vpc_id" {
   type        = string
-  description = "VPC ID where EC2 will be launched"
-  default     = "vpc-01445306434f31b95"
+  default     = "vpc-02b7ace48d47abcea"
 }
 
-variable "public_subnet_ids" {
+variable "private_subnet_ids" {
   type        = list(string)
-  description = "List of public subnets for Jenkins EC2"
   default     = [
-    "subnet-03ca852daae422e1c",
-    "subnet-0d65a06dc480bb19f",
-    "subnet-0f4db8d4112d46229"
+    "subnet-09e40f0c28deae1e2",
+    "subnet-0b3c79932e6d1487d",
+    "subnet-0decf83a78f55d8bd"
   ]
 }
 
@@ -36,25 +45,9 @@ variable "public_subnet_ids" {
 # SECURITY GROUP
 ###################################################
 resource "aws_security_group" "jenkins_sg" {
-  name        = "jenkins-sg"
-  description = "Allow SSH and Jenkins UI access"
+  name        = "jenkins-eks-sg"
+  description = "Allow Jenkins EC2 outbound access and EKS communication"
   vpc_id      = var.vpc_id
-
-  ingress {
-    description = "SSH access"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "Jenkins UI"
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   egress {
     from_port   = 0
@@ -64,15 +57,15 @@ resource "aws_security_group" "jenkins_sg" {
   }
 
   tags = {
-    Name = "jenkins-sg"
+    Name = "jenkins-eks-sg"
   }
 }
 
 ###################################################
-# IAM ROLE + INSTANCE PROFILE
+# IAM ROLE + INSTANCE PROFILE (SSM + Admin)
 ###################################################
 resource "aws_iam_role" "jenkins_role" {
-  name = "jenkins-ec2-role"
+  name = "jenkins-eks-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17",
@@ -84,26 +77,30 @@ resource "aws_iam_role" "jenkins_role" {
   })
 }
 
-# Full permissions for Jenkins to manage AWS (EKS, EC2, S3, etc.)
 resource "aws_iam_role_policy_attachment" "jenkins_admin_policy" {
   role       = aws_iam_role.jenkins_role.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
+resource "aws_iam_role_policy_attachment" "jenkins_ssm_policy" {
+  role       = aws_iam_role.jenkins_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "jenkins_profile" {
-  name = "jenkins-instance-profile"
+  name = "jenkins-eks-profile"
   role = aws_iam_role.jenkins_role.name
 }
 
 ###################################################
-# SINGLE EC2 INSTANCE (Jenkins + EKS Tools)
+# EC2 INSTANCE (Private, via NAT)
 ###################################################
 resource "aws_instance" "jenkins_server" {
   ami                         = "ami-0c7217cdde317cfec" # Ubuntu 22.04 LTS
-  instance_type               = "t2.medium"
-  subnet_id                   = var.public_subnet_ids[0]
+  instance_type               = "t3.medium"
+  subnet_id                   = var.private_subnet_ids[0]
   vpc_security_group_ids      = [aws_security_group.jenkins_sg.id]
-  associate_public_ip_address = true
+  associate_public_ip_address = false
   iam_instance_profile        = aws_iam_instance_profile.jenkins_profile.name
   key_name                    = "mani"
 
@@ -111,52 +108,43 @@ resource "aws_instance" "jenkins_server" {
     #!/bin/bash
     set -e
     apt update -y
+    apt install -y openjdk-21-jre git awscli unzip curl jq python3-pip gnupg software-properties-common snapd
 
-    # Install essentials
-    apt install -y fontconfig openjdk-21-jre git awscli unzip curl jq python3-pip gnupg software-properties-common
+    # Install SSM Agent
+    snap install amazon-ssm-agent --classic
+    systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
+    systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
 
     # Install Jenkins
-    apt install -y fontconfig openjdk-21-jre git awscli unzip
-    mkdir -p /etc/apt/keyrings
-    wget -O /etc/apt/keyrings/jenkins-keyring.asc https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
-    echo "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/" > /etc/apt/sources.list.d/jenkins.list
-    apt update -y
-    apt install -y jenkins
-    systemctl enable jenkins
-    systemctl start jenkins
+    wget -O /usr/share/keyrings/jenkins-keyring.asc https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+    echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/" > /etc/apt/sources.list.d/jenkins.list
+    apt update -y && apt install -y jenkins
+    systemctl enable jenkins && systemctl start jenkins
 
     # Install kubectl
-    curl -o kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-07-18/bin/linux/amd64/kubectl
-    chmod +x ./kubectl && mv ./kubectl /usr/local/bin/
+    curl -o /usr/local/bin/kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-07-18/bin/linux/amd64/kubectl
+    chmod +x /usr/local/bin/kubectl
 
     # Install eksctl
-    curl --silent --location "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" | tar xz -C /tmp
-    mv /tmp/eksctl /usr/local/bin
+    curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_Linux_amd64.tar.gz" | tar xz -C /tmp
+    mv /tmp/eksctl /usr/local/bin/
 
     # Install Terraform
     wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
     echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list
     apt update -y && apt install -y terraform
 
-    echo "✅ Jenkins + Terraform + eksctl + kubectl installed successfully!"
+    echo "✅ Jenkins, Terraform, eksctl, kubectl, and SSM Agent installed successfully!"
   EOF
 
   tags = {
-    Name = "Jenkins-EKS-Server"
+    Name = "Jenkins-EKS-Controller"
   }
 }
 
 ###################################################
 # OUTPUTS
 ###################################################
-output "jenkins_public_ip" {
-  value = aws_instance.jenkins_server.public_ip
-}
-
-output "jenkins_url" {
-  value = "http://${aws_instance.jenkins_server.public_dns}:8080"
-}
-
-output "ssh_command" {
-  value = "ssh -i mani.pem ubuntu@${aws_instance.jenkins_server.public_ip}"
+output "ssm_session_command" {
+  value = "aws ssm start-session --target ${aws_instance.jenkins_server.id}"
 }

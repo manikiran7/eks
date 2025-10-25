@@ -34,9 +34,9 @@ resource "aws_eks_cluster" "eks" {
     endpoint_public_access  = true
 
       public_access_cidrs     = [
-    "98.90.222.230/32",
-    "98.88.112.193/32",
-    "54.211.13.238/32"
+    "98.89.215.51",
+    "3.81.152.207",
+    "54.85.203.73"
   ]
   
   }
