@@ -34,9 +34,9 @@ resource "aws_eks_cluster" "eks" {
     endpoint_public_access  = true
 
       public_access_cidrs     = [
-    "98.89.215.51",
-    "3.81.152.207",
-    "54.85.203.73"
+    "98.89.215.51/32",
+    "3.81.152.207/32",
+    "54.85.203.73/32"
   ]
   
   }
@@ -47,7 +47,7 @@ resource "aws_eks_cluster" "eks" {
   ]
 }
 
-# ✅ Wait for the EKS control plane to become active before continuing
+#  Wait for the EKS control plane to become active before continuing
 resource "null_resource" "wait_for_eks" {
   provisioner "local-exec" {
     command = "aws eks wait cluster-active --name ${aws_eks_cluster.eks.name} --region ${var.region}"
@@ -67,6 +67,41 @@ data "aws_eks_cluster_auth" "eks" {
   name = aws_eks_cluster.eks.name
   depends_on = [null_resource.wait_for_eks]
 }
+
+###############################################
+# 1.2 AWS Auth ConfigMap (EKS IAM → RBAC)
+###############################################
+resource "kubernetes_config_map" "aws_auth" {
+  provider = kubernetes.eks
+
+  metadata {
+    name      = "aws-auth"
+    namespace = "kube-system"
+  }
+
+  data = {
+    mapRoles = yamlencode([
+      {
+        rolearn  = aws_iam_role.eks_cluster_role.arn
+        username = "admin"
+        groups   = ["system:masters"]
+      },
+      {
+        rolearn  = aws_iam_role.fargate_exec_role.arn
+        username = "fargate"
+        groups   = ["system:bootstrappers", "system:nodes"]
+      },
+      {
+        rolearn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/jenkins-eks-role"
+        username = "jenkins"
+        groups   = ["system:masters"]
+      }
+    ])
+  }
+
+  depends_on = [null_resource.wait_for_eks]
+}
+
 
 ###############################################
 # 2. Fargate Pod Execution Role
@@ -99,6 +134,7 @@ resource "aws_eks_fargate_profile" "default" {
 
   selector {
     namespace = "default"
+  labels    = {}
   }
 
   depends_on = [null_resource.wait_for_eks]
@@ -112,9 +148,63 @@ resource "aws_eks_fargate_profile" "kube_system" {
 
   selector {
     namespace = "kube-system"
+    labels    = {}
   }
 
   depends_on = [null_resource.wait_for_eks]
+}
+
+###############################################
+# 🩹 Fargate Profile Role Fix (Safe Redeploy)
+###############################################
+
+# Force recreation of both Fargate profiles if the wrong IAM role is detected
+# This ensures the profiles always use the correct Fargate execution role
+resource "terraform_data" "refresh_fargate_profiles" {
+  triggers_replace = {
+    # This will change when you fix IAM role mismatch
+    fargate_exec_role_arn = aws_iam_role.fargate_exec_role.arn
+  }
+}
+
+resource "aws_eks_fargate_profile" "default_fixed" {
+  cluster_name           = aws_eks_cluster.eks.name
+  fargate_profile_name   = "${var.name_prefix}-default"
+  pod_execution_role_arn = aws_iam_role.fargate_exec_role.arn
+  subnet_ids             = var.private_subnet_ids
+
+  selector {
+    namespace = "default"
+  }
+
+  depends_on = [
+    aws_iam_role.fargate_exec_role,
+    terraform_data.refresh_fargate_profiles
+  ]
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_eks_fargate_profile" "kube_system_fixed" {
+  cluster_name           = aws_eks_cluster.eks.name
+  fargate_profile_name   = "${var.name_prefix}-kube-system"
+  pod_execution_role_arn = aws_iam_role.fargate_exec_role.arn
+  subnet_ids             = var.private_subnet_ids
+
+  selector {
+    namespace = "kube-system"
+  }
+
+  depends_on = [
+    aws_iam_role.fargate_exec_role,
+    terraform_data.refresh_fargate_profiles
+  ]
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 ###############################################
@@ -179,7 +269,7 @@ resource "kubernetes_service_account" "alb_sa" {
   ]
 }
 
-###############################################
+###############################################ß
 # 5. Deploy AWS ALB Controller via Helm
 ###############################################
 resource "helm_release" "alb_controller" {
@@ -189,11 +279,9 @@ resource "helm_release" "alb_controller" {
   chart      = "aws-load-balancer-controller"
   namespace  = "kube-system"
 
-  timeout          = 600
-  cleanup_on_fail  = true
-  replace        = true
-force_update   = true
-
+  timeout         = 900
+  atomic          = true
+  cleanup_on_fail = true
 
   set = [
     { name = "clusterName", value = aws_eks_cluster.eks.name },
@@ -203,9 +291,14 @@ force_update   = true
 
   depends_on = [
     kubernetes_service_account.alb_sa,
-    null_resource.wait_for_eks
+    kubectl_manifest.deployments,
+    null_resource.wait_for_fargate,
+    null_resource.wait_for_pods
   ]
 }
+
+
+
 
 ################################################
 # 6. Deploy Services (No Service Object)
@@ -251,12 +344,12 @@ resource "kubectl_manifest" "deployments" {
   provider  = kubectl.eks
   for_each  = local.rendered_deployments
   yaml_body = each.value
-  wait      = true
+  wait      = false
 
-  depends_on = [
+    depends_on = [
     aws_eks_fargate_profile.default,
-    helm_release.alb_controller,
-    null_resource.wait_for_eks
+    null_resource.wait_for_fargate,
+    kubernetes_config_map.aws_auth
   ]
 }
 
@@ -267,14 +360,16 @@ resource "kubectl_manifest" "ingress" {
   provider  = kubectl.eks
   for_each  = local.rendered_ingress
   yaml_body = each.value
-  wait      = true
+  wait      = false 
 
   depends_on = [
-    kubectl_manifest.deployments,
-    helm_release.alb_controller,
-    null_resource.wait_for_eks
+    aws_eks_fargate_profile.default,
+    null_resource.wait_for_fargate,
+    kubernetes_config_map.aws_auth
   ]
 }
+
+
 
 ###############################################
 # Metrics Server + HPA
@@ -285,6 +380,7 @@ resource "helm_release" "metrics_server" {
   repository = "https://kubernetes-sigs.github.io/metrics-server/"
   chart      = "metrics-server"
   namespace  = "kube-system"
+
 
   set_list = [{
     name  = "args"
@@ -304,10 +400,12 @@ resource "kubectl_manifest" "hpa" {
   wait      = true
 
   depends_on = [
-    helm_release.metrics_server,
-    kubectl_manifest.deployments,
-    null_resource.wait_for_eks
-  ]
+  null_resource.wait_for_pods,
+  kubectl_manifest.ingress,
+  null_resource.wait_for_fargate
+]
+
+
 }
 
 ###############################################
@@ -364,11 +462,11 @@ resource "aws_iam_role_policy_attachment" "cloudwatch_agent_managed_policy" {
 # 8. CloudWatch Agent (Metrics + Logs)
 ###############################################
 resource "helm_release" "cloudwatch_container_insights" {
-  provider   = helm.eks
-  name       = "aws-cloudwatch-observability"
-  repository = "https://aws.github.io/eks-charts"
-  chart      = "aws-cloudwatch-metrics"
-  namespace  = "amazon-cloudwatch"
+  provider         = helm.eks
+  name             = "aws-cloudwatch-observability"
+  repository       = "https://aws.github.io/eks-charts"
+  chart            = "aws-cloudwatch-metrics"
+  namespace        = "amazon-cloudwatch"
   create_namespace = true
 
   set = [
@@ -381,13 +479,16 @@ resource "helm_release" "cloudwatch_container_insights" {
     { name = "logs.enabled", value = "true" }
   ]
 
-  depends_on = [
-    aws_iam_role.cloudwatch_agent_role,
-    helm_release.metrics_server,
-    aws_eks_fargate_profile.default,
-    null_resource.wait_for_eks
-  ]
+ depends_on = [
+  kubectl_manifest.deployments,
+  kubectl_manifest.ingress,
+  null_resource.wait_for_fargate
+]
+
 }
+
+
+
 
 ###############################################
 # 9. CloudWatch Dashboard (CPU + Memory + Pods)
@@ -444,4 +545,40 @@ resource "aws_cloudwatch_dashboard" "eks_services_dashboard" {
       }
     ]
   })
+}
+
+###############################################
+# 10. Security Group Rule — Allow HTTPS to EKS
+###############################################
+#resource "aws_security_group_rule" "allow_https_to_eks" {
+  #type                     = "ingress"
+ # from_port                = 443
+  #to_port                  = 443
+  #protocol                 = "tcp"
+ # source_security_group_id = "sg-09c166b6f4a57c95c" # Jenkins or EC2 SG
+ # security_group_id        = aws_eks_cluster.eks.vpc_config[0].cluster_security_group_id
+ # description              = "Allow HTTPS from Jenkins EC2 SG to EKS Control Plane"
+ # depends_on               = [aws_eks_cluster.eks]
+#}
+
+resource "null_resource" "wait_for_fargate" {
+  provisioner "local-exec" {
+    command = "echo 'Waiting 120s for Fargate/OIDC propagation...' && sleep 120"
+  }
+  depends_on = [
+    aws_eks_fargate_profile.kube_system,
+    aws_eks_fargate_profile.default,
+    aws_iam_openid_connect_provider.eks
+  ]
+}
+
+# wait a bit for Fargate pods to start and stabilize after deployments
+resource "null_resource" "wait_for_pods" {
+  provisioner "local-exec" {
+    command = "echo 'Waiting 90s for pods to stabilize...' && sleep 90"
+  }
+
+  depends_on = [
+    kubectl_manifest.deployments
+  ]
 }

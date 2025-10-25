@@ -13,16 +13,16 @@ variable "region" {
 variable "vpc_id" {
   description = "VPC ID to deploy EKS into"
   type        = string
-  default     = "vpc-0e6ab837a848c0d64"
+  default     = "vpc-02b7ace48d47abcea"
 }
 
 variable "public_subnet_ids" {
   description = "List of public subnets used for ALB / public resources"
   type        = list(string)
   default     = [
-     "subnet-00c9e347cb13998b2",
-  "subnet-0f429bfe146c109bd",
-  "subnet-0e6c2d023a95e9e91"
+"subnet-0ce42c0a6f8a75095",
+  "subnet-077c75c62d335b517",
+  "subnet-0872779df67bfa27c"
   ]
 }
 
@@ -30,9 +30,9 @@ variable "private_subnet_ids" {
   description = "List of private subnets used for workloads and pods"
   type        = list(string)
   default     = [
- "subnet-044605d196176916c",
-  "subnet-02070e0943e29a127",
-  "subnet-0b7e56131574a5164"
+ "subnet-09e40f0c28deae1e2",
+  "subnet-0b3c79932e6d1487d",
+  "subnet-0decf83a78f55d8bd"
   ]
 }
 
@@ -55,7 +55,7 @@ variable "services" {
 
   default = {
     user-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8080
       replicas     = 2
       min_replicas = 2
@@ -63,7 +63,7 @@ variable "services" {
       path         = "/user"
     }
     order-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8081
       replicas     = 2
       min_replicas = 2
@@ -71,7 +71,7 @@ variable "services" {
       path         = "/order"
     }
     payment-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8082
       replicas     = 2
       min_replicas = 2
@@ -79,7 +79,7 @@ variable "services" {
       path         = "/payment"
     }
     inventory-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8083
       replicas     = 2
       min_replicas = 2
@@ -87,7 +87,7 @@ variable "services" {
       path         = "/inventory"
     }
     notification-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8084
       replicas     = 2
       min_replicas = 2
@@ -95,7 +95,7 @@ variable "services" {
       path         = "/notification"
     }
     gateway-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8085
       replicas     = 2
       min_replicas = 2
@@ -103,7 +103,7 @@ variable "services" {
       path         = "/gateway"
     }
     report-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8086
       replicas     = 2
       min_replicas = 2
@@ -111,7 +111,7 @@ variable "services" {
       path         = "/report"
     }
     auth-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8087
       replicas     = 2
       min_replicas = 2
@@ -119,7 +119,7 @@ variable "services" {
       path         = "/auth"
     }
     analytics-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8088
       replicas     = 2
       min_replicas = 2
@@ -127,7 +127,7 @@ variable "services" {
       path         = "/analytics"
     }
     frontend-service = {
-      image_tag    = "v1.0.0"
+      image_tag    = "v1.0.1"
       port         = 8089
       replicas     = 2
       min_replicas = 2

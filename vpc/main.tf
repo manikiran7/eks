@@ -71,6 +71,21 @@ resource "aws_vpc" "main" {
   }
 }
 
+###############################################
+# Fix DNS attributes for existing VPC (provider ≥5.0)
+###############################################
+resource "null_resource" "enable_vpc_dns" {
+  depends_on = [aws_vpc.main]
+
+  provisioner "local-exec" {
+    command = <<EOT
+      aws ec2 modify-vpc-attribute --vpc-id ${aws_vpc.main.id} --enable-dns-support
+      aws ec2 modify-vpc-attribute --vpc-id ${aws_vpc.main.id} --enable-dns-hostnames
+    EOT
+  }
+}
+
+
 #########################
 # Internet Gateway
 #########################
