@@ -646,23 +646,27 @@ EOT
   ]
 }
 
-# ✅ Wait for all pods to become Ready before proceeding
 resource "null_resource" "wait_for_pods" {
+  # Run only when deployments change (prevents tainting/recreation each time)
+  triggers = {
+    deployments_hash = sha1(join(",", keys(kubectl_manifest.deployments)))
+  }
+
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<EOT
 set -e
-echo "⏳ Waiting for all pods to be Ready..."
-for i in $(seq 1 10); do
-  not_ready=$(kubectl get pods -A --no-headers | grep -v Running || true)
+echo "⏳ Waiting for pods in 'default' namespace to be Ready..."
+for i in $(seq 1 20); do
+  not_ready=$(kubectl get pods -n default --no-headers | grep -v Running || true)
   if [ -z "$not_ready" ]; then
-    echo "✅ All pods are Ready."
+    echo "✅ All pods in default namespace are Ready."
     exit 0
   fi
-  echo "⌛ Still waiting... ($i/30)"
+  echo "⌛ Still waiting... ($i/20)"
   sleep 10
 done
-echo "❌ Timeout waiting for pods." >&2
+echo "❌ Timeout waiting for pods in default namespace." >&2
 exit 1
 EOT
   }
