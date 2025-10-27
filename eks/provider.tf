@@ -37,30 +37,6 @@ provider "aws" {
 }
 
 # --------------------------------------------------------------------
-# Wait for EKS readiness and verify connectivity before initializing providers
-# --------------------------------------------------------------------
-resource "null_resource" "verify_eks_connection" {
-  provisioner "local-exec" {
-    command = <<EOT
-endpoint=$(aws eks describe-cluster --name ${var.name_prefix}-eks --region ${var.region} --query "cluster.endpoint" --output text)
-echo "🔍 Checking EKS endpoint: $endpoint"
-for i in $(seq 1 10); do
-  if curl -sk --connect-timeout 5 "$endpoint"/version > /dev/null; then
-    echo "✅ EKS API is reachable."
-    exit 0
-  fi
-  echo "⏳ Waiting for EKS API... ($i/10)"
-  sleep 10
-done
-echo "❌ EKS API not reachable after retries." >&2
-exit 1
-EOT
-  }
-
-  depends_on = [aws_eks_cluster.eks, null_resource.wait_for_eks]
-}
-
-# --------------------------------------------------------------------
 # EKS Cluster Data Sources (used by Kubernetes / Helm / Kubectl providers)
 # --------------------------------------------------------------------
 data "aws_eks_cluster" "eks" {
