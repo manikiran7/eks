@@ -1,0 +1,165 @@
+pipeline {
+    agent any
+
+    parameters {
+        /********************************************
+         * Global deploy selection
+         ********************************************/
+        choice(name: 'SERVICE_NAME', choices: [
+            'user-service',
+            'order-service',
+            'payment-service',
+            'inventory-service',
+            'notification-service',
+            'gateway-service',
+            'report-service',
+            'auth-service',
+            'analytics-service',
+            'frontend-service'
+        ], description: 'Select the microservice to deploy')
+
+        string(name: 'IMAGE_VERSION', defaultValue: 'v1.0.1', description: 'ECR image tag version to deploy')
+
+        /********************************************
+         * Individual service parameters
+         ********************************************/
+        string(name: 'USER_PORT', defaultValue: '8080')
+        string(name: 'ORDER_PORT', defaultValue: '8081')
+        string(name: 'PAYMENT_PORT', defaultValue: '8082')
+        string(name: 'INVENTORY_PORT', defaultValue: '8083')
+        string(name: 'NOTIFICATION_PORT', defaultValue: '8084')
+        string(name: 'GATEWAY_PORT', defaultValue: '8085')
+        string(name: 'REPORT_PORT', defaultValue: '8086')
+        string(name: 'AUTH_PORT', defaultValue: '8087')
+        string(name: 'ANALYTICS_PORT', defaultValue: '8088')
+        string(name: 'FRONTEND_PORT', defaultValue: '8089')
+    }
+
+    environment {
+        SSH_CRED = 'jenkins'
+        PRIVATE_IP = '10.100.0.175'
+        GIT_REPO = 'git@github.com:manikiran7/eks.git'
+        GIT_BRANCH = 'main'
+        TF_DIR = '/home/ubuntu/'
+    }
+
+    stages {
+        /******************************
+         * 1️⃣ Pull Latest Code
+         ******************************/
+        stage('Pull Latest Terraform Code on Private EC2') {
+            steps {
+                sshagent([SSH_CRED]) {
+                    sh """
+                    echo "🔹 Pulling latest Terraform code from GitHub..."
+
+                    ssh -o StrictHostKeyChecking=no ubuntu@${PRIVATE_IP} '
+                        set -e
+                        if [ ! -d /home/ubuntu/eks/eks ]; then
+                            echo "❌ Directory missing, cloning repo..."
+                            git clone -b ${GIT_BRANCH} ${GIT_REPO} /home/ubuntu/
+                        fi
+
+                        cd /home/ubuntu/eks/eks
+                        git fetch origin ${GIT_BRANCH}
+                        git checkout -B ${GIT_BRANCH} origin/${GIT_BRANCH}
+                        git reset --hard origin/${GIT_BRANCH}
+
+                        echo "✅ Repository updated successfully!"
+                        git log -1 --oneline
+                    '
+                    """
+                }
+            }
+        }
+
+        /******************************
+         * 2️⃣ Generate override.auto.tfvars
+         ******************************/
+        stage('Generate Terraform Override File') {
+            steps {
+                script {
+                    def servicePort = ""
+                    def servicePath = "/${SERVICE_NAME.split('-')[0]}"
+
+                    // Map ports dynamically
+                    switch(SERVICE_NAME) {
+                        case "user-service": servicePort = USER_PORT; break
+                        case "order-service": servicePort = ORDER_PORT; break
+                        case "payment-service": servicePort = PAYMENT_PORT; break
+                        case "inventory-service": servicePort = INVENTORY_PORT; break
+                        case "notification-service": servicePort = NOTIFICATION_PORT; break
+                        case "gateway-service": servicePort = GATEWAY_PORT; break
+                        case "report-service": servicePort = REPORT_PORT; break
+                        case "auth-service": servicePort = AUTH_PORT; break
+                        case "analytics-service": servicePort = ANALYTICS_PORT; break
+                        case "frontend-service": servicePort = FRONTEND_PORT; servicePath = "/"; break
+                        default: error("Unknown service: ${SERVICE_NAME}")
+                    }
+
+                    sshagent([SSH_CRED]) {
+                        sh """
+                        echo "🔹 Generating override.auto.tfvars for ${SERVICE_NAME}:${IMAGE_VERSION}..."
+
+                        ssh -o StrictHostKeyChecking=no ubuntu@${PRIVATE_IP} "
+                            set -e
+                            cd ${TF_DIR}
+                            cat > override.auto.tfvars <<EOT
+services = {
+  ${SERVICE_NAME} = {
+    image_tag    = \\"${IMAGE_VERSION}\\"
+    port         = ${servicePort}
+    replicas     = 1
+    min_replicas = 2
+    max_replicas = 3
+    path         = \\"${servicePath}\\"
+  }
+}
+EOT
+                            echo '✅ override.auto.tfvars created:'
+                            cat override.auto.tfvars
+                        "
+                        """
+                    }
+                }
+            }
+        }
+
+        /******************************
+         * 3️⃣ Run Terraform Apply
+         ******************************/
+        stage('Run Terraform Apply') {
+            steps {
+                sshagent([SSH_CRED]) {
+                    sh """
+                    echo "🚀 Deploying ${SERVICE_NAME}:${IMAGE_VERSION}..."
+                    ssh -o StrictHostKeyChecking=no ubuntu@${PRIVATE_IP} "
+                        set -e
+                        cd ${TF_DIR}
+                        terraform init -input=false
+                        terraform destroy -auto-approve
+                    "
+                    """
+                }
+            }
+        }
+
+        /******************************
+         * 4️⃣ Verify Deployment
+         ******************************/
+        stage('Verify Deployment') {
+            steps {
+                sshagent([SSH_CRED]) {
+                    sh """
+                    echo "🔍 Verifying deployment for ${SERVICE_NAME}..."
+                    ssh -o StrictHostKeyChecking=no ubuntu@${PRIVATE_IP} "
+                        kubectl get pods -n default -l app=${SERVICE_NAME} -o wide || true
+                        kubectl get deployment ${SERVICE_NAME} -n default || true
+                        kubectl get ingress -n default | grep ${SERVICE_NAME} || true
+                    "
+                    """
+                }
+            }
+        }
+    }
+}
