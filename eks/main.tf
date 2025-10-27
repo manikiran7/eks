@@ -496,11 +496,18 @@ resource "null_resource" "wait_for_pods" {
   ]
 }
 
-# ✅ Ensure the EKS API endpoint is ready before Kubernetes provider connects
+# ✅ Wait for the EKS API to become active and reachable
 resource "null_resource" "wait_for_api" {
   provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
     command = <<EOT
-endpoint=$(aws eks describe-cluster --name ${aws_eks_cluster.eks.name} --region ${var.region} --query "cluster.endpoint" --output text)
+set -e
+endpoint=$(aws eks describe-cluster \
+  --name ${aws_eks_cluster.eks.name} \
+  --region ${var.region} \
+  --query "cluster.endpoint" \
+  --output text)
+
 echo "🔍 Waiting for EKS API at $endpoint..."
 for i in $(seq 1 10); do
   if curl -sk --connect-timeout 5 "$endpoint"/version > /dev/null; then
@@ -510,9 +517,40 @@ for i in $(seq 1 10); do
   echo "⏳ Waiting... ($i/10)"
   sleep 10
 done
+
 echo "❌ ERROR: EKS API not reachable after retries!" >&2
 exit 1
 EOT
   }
-  depends_on = [null_resource.wait_for_eks]
+  depends_on = [aws_eks_cluster.eks]
+}
+
+# ✅ Verify EKS connectivity (runs right after wait_for_api)
+resource "null_resource" "verify_eks_connection" {
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command = <<EOT
+set -e
+endpoint=$(aws eks describe-cluster \
+  --name ${aws_eks_cluster.eks.name} \
+  --region ${var.region} \
+  --query "cluster.endpoint" \
+  --output text)
+
+echo "🔍 Checking EKS endpoint: $endpoint"
+for i in $(seq 1 10); do
+  if curl -sk --connect-timeout 5 "$endpoint"/version > /dev/null; then
+    echo "✅ EKS API is reachable."
+    exit 0
+  fi
+  echo "⏳ Waiting for EKS API... ($i/10)"
+  sleep 10
+done
+
+echo "❌ EKS API not reachable after retries." >&2
+exit 1
+EOT
+  }
+
+  depends_on = [null_resource.wait_for_api]
 }
