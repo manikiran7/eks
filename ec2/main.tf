@@ -126,10 +126,19 @@ resource "aws_instance" "jenkins_server" {
     systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service
     systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service
 
-    # --- Install kubectl ---
-    echo "🔹 Installing kubectl..."
-    curl -o /usr/local/bin/kubectl https://s3.us-west-2.amazonaws.com/amazon-eks/1.30.0/2024-07-18/bin/linux/amd64/kubectl
-    chmod +x /usr/local/bin/kubectl
+    curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+kubectl version --client
+
+# Download the official Helm install script
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+# Verify the installation
+sudo mv /usr/local/bin/helm /usr/bin/helm
+sudo chmod +x /usr/bin/helm
+
+
 
     # --- Install eksctl ---
     echo "🔹 Installing eksctl..."
