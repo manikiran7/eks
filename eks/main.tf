@@ -144,10 +144,6 @@ resource "aws_eks_fargate_profile" "default" {
 
   depends_on = [null_resource.wait_for_eks]
 
-  lifecycle {
-    create_before_destroy = true
-  }
-
   tags = {
     Name        = "${var.name_prefix}-fargate-profile-default"
     Environment = var.name_prefix
@@ -167,12 +163,10 @@ resource "aws_eks_fargate_profile" "kube_system" {
 
   depends_on = [
     null_resource.wait_for_eks,
-    aws_eks_fargate_profile.default  # ensure kube-system comes after default (optional)
+    aws_eks_fargate_profile.default 
   ]
 
-  lifecycle {
-    create_before_destroy = true
-  }
+  
 
   tags = {
     Name        = "${var.name_prefix}-fargate-profile-kube-system"
