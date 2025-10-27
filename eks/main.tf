@@ -31,13 +31,7 @@ resource "aws_eks_cluster" "eks" {
   vpc_config {
     subnet_ids              = var.private_subnet_ids
     endpoint_private_access = true
-    endpoint_public_access  = false
-
-      public_access_cidrs     = [
-    "54.164.243.107/32",
-    "54.144.111.172/32",
-    "18.235.22.220/32"
-  ]
+    endpoint_public_access  = true
   
   }
 
@@ -474,7 +468,7 @@ resource "aws_security_group_rule" "allow_https_to_eks" {
   from_port                = 443
   to_port                  = 443
   protocol                 = "tcp"
- source_security_group_id = "sg-0da38f6b140473bdf" 
+ source_security_group_id = "sg-099263263e2326f88" 
  security_group_id        = aws_eks_cluster.eks.vpc_config[0].cluster_security_group_id
  description              = "Allow HTTPS from Jenkins EC2 SG to EKS Control Plane"
  depends_on               = [aws_eks_cluster.eks]
