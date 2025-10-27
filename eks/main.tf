@@ -51,7 +51,7 @@ resource "null_resource" "wait_for_eks" {
 
 
 ###############################################
-# 1.2 AWS Auth ConfigMap (EKS IAM → RBAC)
+# 2 AWS Auth ConfigMap (EKS IAM → RBAC)
 ###############################################
 # 🧩 Try to read existing aws-auth ConfigMap
 data "kubernetes_config_map" "aws_auth_existing" {
@@ -110,7 +110,7 @@ resource "kubernetes_config_map" "aws_auth" {
 }
 
 ###############################################
-# 2. Fargate Pod Execution Role
+# 3. Fargate Pod Execution Role
 ###############################################
 resource "aws_iam_role" "fargate_exec_role" {
   name = "${var.name_prefix}-fargate-exec-role"
@@ -130,7 +130,7 @@ resource "aws_iam_role_policy_attachment" "fargate_exec_attach" {
 }
 
 ###############################################
-# 3. Fargate Profiles
+# 4. Fargate Profiles
 ###############################################
 resource "aws_eks_fargate_profile" "default" {
   cluster_name           = aws_eks_cluster.eks.name
@@ -179,7 +179,7 @@ resource "aws_eks_fargate_profile" "kube_system" {
 
 
 ###############################################
-# 4. OIDC & ALB Controller IAM Role (Fixed)
+# 5. OIDC & ALB Controller IAM Role (Fixed)
 ###############################################
 
 resource "aws_iam_openid_connect_provider" "eks" {
@@ -192,7 +192,7 @@ resource "aws_iam_openid_connect_provider" "eks" {
 }
 
 # --------------------------------------------------------------------
-# ALB Controller IAM Policy and Role
+# 6 ALB Controller IAM Policy and Role
 # --------------------------------------------------------------------
 resource "aws_iam_policy" "alb_controller_policy_custom" {
   name        = "${var.name_prefix}-AWSLoadBalancerControllerPolicy"
@@ -223,7 +223,7 @@ resource "aws_iam_role_policy_attachment" "alb_controller_policy" {
 }
 
 # --------------------------------------------------------------------
-# Kubernetes Service Account (AWS Load Balancer Controller)
+# 7 Kubernetes Service Account (AWS Load Balancer Controller)
 # --------------------------------------------------------------------
 resource "kubernetes_service_account" "alb_sa" {
   provider = kubernetes.eks
@@ -247,9 +247,51 @@ resource "kubernetes_service_account" "alb_sa" {
 }
 
 
+###############################################
+# 8. AWS Load Balancer Controller (Helm)
+###############################################
+resource "helm_release" "alb_controller" {
+  provider  = helm.eks
+  name      = "aws-load-balancer-controller"
+  namespace = "kube-system"
+
+  repository = "https://aws.github.io/eks-charts"
+  chart      = "aws-load-balancer-controller"
+  version    = "1.9.2" # or latest compatible with your EKS version
+
+  set = [
+    {
+      name  = "clusterName"
+      value = aws_eks_cluster.eks.name
+    },
+    {
+      name  = "serviceAccount.create"
+      value = "false"
+    },
+    {
+      name  = "serviceAccount.name"
+      value = kubernetes_service_account.alb_sa.metadata[0].name
+    },
+    {
+      name  = "region"
+      value = var.region
+    },
+    {
+      name  = "vpcId"
+      value = var.vpc_id
+    }
+  ]
+
+  depends_on = [
+    kubernetes_service_account.alb_sa,
+    aws_iam_role.alb_controller,
+    aws_iam_role_policy_attachment.alb_controller_policy,
+    null_resource.wait_for_eks
+  ]
+}
 
 ################################################
-# 6. Deploy Services (No Service Object)
+# 9. Deploy Services (No Service Object)
 ###############################################
 data "aws_caller_identity" "current" {}
 
@@ -286,7 +328,7 @@ locals {
 }
 
 ###############################################
-# Deployments
+# 10 Deployments
 ###############################################
 # ✅ Deploy Kubernetes resources safely to EKS
 resource "kubectl_manifest" "deployments" {
@@ -301,16 +343,6 @@ resource "kubectl_manifest" "deployments" {
     ignore_changes = [yaml_body]
   }
 
-  triggers = {
-    image_tag = var.services[each.key].image_tag
-  }
-
-  provisioner "local-exec" {
-    command = <<EOT
-kubectl apply -f <(echo '${each.value}') --namespace default
-EOT
-  }
-
   depends_on = [
     null_resource.refresh_kubeconfig,
     aws_eks_cluster.eks,
@@ -319,8 +351,9 @@ EOT
   ]
 }
 
+
 ###############################################
-# Ingress (direct to pods via IP targets)
+# 11 Ingress (direct to pods via IP targets)
 ###############################################
 # ✅ Deploy ingress manifests only after deployments are ready
 resource "kubectl_manifest" "ingress" {
@@ -345,7 +378,7 @@ resource "kubectl_manifest" "ingress" {
 
 
 ###############################################
-# Metrics Server + HPA
+# 12 Metrics Server + HPA
 ###############################################
 # 🔍 Check if metrics-server already exists
 # 🔍 Check if metrics-server exists
@@ -387,7 +420,7 @@ resource "helm_release" "metrics_server" {
 
 
 ###############################################
-# HPA
+# 13 HPA
 ###############################################
 resource "kubectl_manifest" "hpa" {
   provider  = kubectl.eks
@@ -405,7 +438,7 @@ resource "kubectl_manifest" "hpa" {
 }
 
 ###############################################
-# 7. Enable CloudWatch Container Insights
+# 14. Enable CloudWatch Container Insights
 ###############################################
 resource "aws_cloudwatch_log_group" "eks_container_insights" {
   name              = "/aws/containerinsights/${aws_eks_cluster.eks.name}/performance"
@@ -455,7 +488,7 @@ resource "aws_iam_role_policy_attachment" "cloudwatch_agent_managed_policy" {
 }
 
 ###############################################
-# 8. CloudWatch Agent (Metrics + Logs)
+# 15. CloudWatch Agent (Metrics + Logs)
 ###############################################
 resource "helm_release" "cloudwatch_container_insights" {
   provider         = helm.eks
@@ -487,7 +520,7 @@ resource "helm_release" "cloudwatch_container_insights" {
 
 
 ###############################################
-# 9. CloudWatch Dashboard (CPU + Memory + Pods)
+# 16. CloudWatch Dashboard (CPU + Memory + Pods)
 ###############################################
 resource "aws_cloudwatch_dashboard" "eks_services_dashboard" {
   dashboard_name = "${var.name_prefix}-eks-dashboard"
@@ -544,7 +577,7 @@ resource "aws_cloudwatch_dashboard" "eks_services_dashboard" {
 }
 
 ###############################################
-# 10. Security Group Rule — Allow HTTPS to EKS
+# 17. Security Group Rule — Allow HTTPS to EKS
 ###############################################
 resource "aws_security_group_rule" "allow_https_to_eks" {
   type                     = "ingress"
@@ -570,7 +603,7 @@ resource "null_resource" "wait_for_fargate" {
 
 
 
-# ✅ Wait for the EKS API to become active and reachable
+# 18 Wait for the EKS API to become active and reachable
 resource "null_resource" "wait_for_api" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
@@ -599,7 +632,7 @@ EOT
   depends_on = [aws_eks_cluster.eks]
 }
 
-# ✅ Verify EKS connectivity (runs right after wait_for_api)
+#  19 Verify EKS connectivity (runs right after wait_for_api)
 resource "null_resource" "verify_eks_connection" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
@@ -629,7 +662,7 @@ EOT
   depends_on = [null_resource.wait_for_api]
 }
 
-
+# 20 aws auth check 
 resource "null_resource" "aws_auth_check" {
   provisioner "local-exec" {
     command = "echo 'aws-auth already exists, skipping creation...'"
@@ -657,6 +690,7 @@ EOT
   ]
 }
 
+# 21 waiting for pods deploy 
 resource "null_resource" "wait_for_pods" {
   # Run only when deployments change (prevents tainting/recreation each time)
   triggers = {
@@ -685,5 +719,28 @@ EOT
   depends_on = [
     kubectl_manifest.deployments,
     null_resource.refresh_kubeconfig
+  ]
+}
+
+#22 deploying the pods
+resource "null_resource" "apply_image_update" {
+  for_each = var.services
+
+  triggers = {
+    image_tag = each.value.image_tag
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command = <<EOT
+echo "🚀 Deploying ${each.key} with image tag: ${each.value.image_tag}"
+echo '${local.rendered_deployments[each.key]}' | kubectl apply -f -
+kubectl rollout status deployment/${each.key} -n default --timeout=120s
+EOT
+  }
+
+  depends_on = [
+    null_resource.refresh_kubeconfig,
+    kubectl_manifest.deployments
   ]
 }
