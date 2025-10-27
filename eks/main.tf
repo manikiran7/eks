@@ -140,12 +140,18 @@ resource "aws_eks_fargate_profile" "default" {
 
   selector {
     namespace = "default"
-  labels    = {}
   }
 
   depends_on = [null_resource.wait_for_eks]
+
   lifecycle {
     create_before_destroy = true
+  }
+
+  tags = {
+    Name        = "${var.name_prefix}-fargate-profile-default"
+    Environment = var.name_prefix
+    ManagedBy   = "Terraform"
   }
 }
 
@@ -157,14 +163,25 @@ resource "aws_eks_fargate_profile" "kube_system" {
 
   selector {
     namespace = "kube-system"
-    labels    = {}
   }
 
-  depends_on = [null_resource.wait_for_eks]
+  depends_on = [
+    null_resource.wait_for_eks,
+    aws_eks_fargate_profile.default  # ensure kube-system comes after default (optional)
+  ]
+
   lifecycle {
     create_before_destroy = true
   }
+
+  tags = {
+    Name        = "${var.name_prefix}-fargate-profile-kube-system"
+    Environment = var.name_prefix
+    ManagedBy   = "Terraform"
+  }
 }
+
+
 
 
 ###############################################
@@ -642,7 +659,7 @@ resource "null_resource" "wait_for_pods" {
     command = <<EOT
 set -e
 echo "⏳ Waiting for all pods to be Ready..."
-for i in $(seq 1 30); do
+for i in $(seq 1 10); do
   not_ready=$(kubectl get pods -A --no-headers | grep -v Running || true)
   if [ -z "$not_ready" ]; then
     echo "✅ All pods are Ready."
