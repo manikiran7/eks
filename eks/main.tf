@@ -770,3 +770,19 @@ EOT
     kubectl_manifest.deployments
   ]
 }
+
+data "kubernetes_ingress" "existing" {
+  for_each = local.rendered_ingress
+  metadata {
+    name      = each.key
+    namespace = "default"
+  }
+  provider = kubernetes.eks
+}
+
+resource "kubectl_manifest" "ingress" {
+  provider  = kubectl.eks
+  for_each  = { for k, v in local.rendered_ingress : k => v if !contains(keys(data.kubernetes_ingress.existing), k) }
+  yaml_body = each.value
+  wait = true
+}
