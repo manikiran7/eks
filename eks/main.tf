@@ -330,7 +330,7 @@ locals {
 ###############################################
 # 10 Deployments
 ###############################################
-# ✅ Deploy Kubernetes resources safely to EKS
+#  Deploy Kubernetes resources safely to EKS
 resource "kubectl_manifest" "deployments" {
   provider  = kubectl.eks
   for_each  = local.rendered_deployments
@@ -340,7 +340,8 @@ resource "kubectl_manifest" "deployments" {
   force_conflicts = true
 
   lifecycle {
-    ignore_changes = [yaml_body]
+    prevent_destroy = true
+    ignore_changes  = [yaml_body]
   }
 
   depends_on = [
@@ -355,15 +356,19 @@ resource "kubectl_manifest" "deployments" {
 ###############################################
 # 11 Ingress (direct to pods via IP targets)
 ###############################################
-# ✅ Deploy ingress manifests only after deployments are ready
+# Deploy ingress manifests only after deployments are ready
 resource "kubectl_manifest" "ingress" {
   provider  = kubectl.eks
   for_each  = local.rendered_ingress
   yaml_body = each.value
 
-  # Wait until ingress objects are ready
-  wait = true
+  wait            = true
   force_conflicts = true
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [yaml_body]
+  }
 
   depends_on = [
     null_resource.refresh_kubeconfig, 
@@ -380,8 +385,7 @@ resource "kubectl_manifest" "ingress" {
 ###############################################
 # 12 Metrics Server + HPA
 ###############################################
-# 🔍 Check if metrics-server already exists
-# 🔍 Check if metrics-server exists
+
 data "external" "check_metrics_server" {
   program = ["bash", "-c", <<EOT
 if helm status metrics-server -n kube-system >/dev/null 2>&1; then
@@ -393,7 +397,7 @@ EOT
   ]
 }
 
-# 🚀 Create only if missing
+#  Create only if missing
 resource "helm_release" "metrics_server" {
   count      = data.external.check_metrics_server.result.exists == "false" ? 1 : 0
   provider   = helm.eks
@@ -428,14 +432,18 @@ resource "kubectl_manifest" "hpa" {
   yaml_body = each.value
   wait      = true
 
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [yaml_body]
+  }
+
   depends_on = [
-  null_resource.wait_for_pods,
-  kubectl_manifest.ingress,
-  null_resource.wait_for_fargate
-]
-
-
+    null_resource.wait_for_pods,
+    kubectl_manifest.ingress,
+    null_resource.wait_for_fargate
+  ]
 }
+
 
 ###############################################
 # 14. Enable CloudWatch Container Insights
@@ -615,17 +623,17 @@ endpoint=$(aws eks describe-cluster \
   --query "cluster.endpoint" \
   --output text)
 
-echo "🔍 Waiting for EKS API at $endpoint..."
+echo " Waiting for EKS API at $endpoint..."
 for i in $(seq 1 10); do
   if curl -sk --connect-timeout 5 "$endpoint"/version > /dev/null; then
-    echo "✅ EKS API reachable."
+    echo " EKS API reachable."
     exit 0
   fi
   echo "⏳ Waiting... ($i/10)"
   sleep 10
 done
 
-echo "❌ ERROR: EKS API not reachable after retries!" >&2
+echo " ERROR: EKS API not reachable after retries!" >&2
 exit 1
 EOT
   }
@@ -644,17 +652,17 @@ endpoint=$(aws eks describe-cluster \
   --query "cluster.endpoint" \
   --output text)
 
-echo "🔍 Checking EKS endpoint: $endpoint"
+echo " Checking EKS endpoint: $endpoint"
 for i in $(seq 1 10); do
   if curl -sk --connect-timeout 5 "$endpoint"/version > /dev/null; then
-    echo "✅ EKS API is reachable."
+    echo " EKS API is reachable."
     exit 0
   fi
-  echo "⏳ Waiting for EKS API... ($i/10)"
+  echo " Waiting for EKS API... ($i/10)"
   sleep 10
 done
 
-echo "❌ EKS API not reachable after retries." >&2
+echo " EKS API not reachable after retries." >&2
 exit 1
 EOT
   }
@@ -677,7 +685,7 @@ resource "null_resource" "refresh_kubeconfig" {
     interpreter = ["/bin/bash", "-c"]
     command = <<EOT
 set -e
-echo "🔄 Updating kubeconfig for EKS cluster..."
+echo " Updating kubeconfig for EKS cluster..."
 aws eks update-kubeconfig --name ${aws_eks_cluster.eks.name} --region ${var.region}
 kubectl get nodes || echo "⚠️ Cluster not ready yet, continuing..."
 EOT
@@ -700,18 +708,17 @@ resource "null_resource" "wait_for_pods" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<EOT
-set -e
-echo "⏳ Waiting for pods in 'default' namespace to be Ready..."
+set -e Waiting for pods in 'default' namespace to be Ready..."
 for i in $(seq 1 20); do
   not_ready=$(kubectl get pods -n default --no-headers | grep -v Running || true)
   if [ -z "$not_ready" ]; then
-    echo "✅ All pods in default namespace are Ready."
+    echo " All pods in default namespace are Ready."
     exit 0
   fi
   echo "⌛ Still waiting... ($i/20)"
   sleep 10
 done
-echo "❌ Timeout waiting for pods in default namespace." >&2
+echo "Timeout waiting for pods in default namespace." >&2
 exit 1
 EOT
   }
@@ -733,9 +740,28 @@ resource "null_resource" "apply_image_update" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<EOT
-echo "🚀 Deploying ${each.key} with image tag: ${each.value.image_tag}"
-echo '${local.rendered_deployments[each.key]}' | kubectl apply -f -
-kubectl rollout status deployment/${each.key} -n default --timeout=120s
+set -euo pipefail
+svc=${each.key}
+image_tag=${each.value.image_tag}
+# The container name in deployment should match svc (adjust if different)
+image_repo="${account_id}.dkr.ecr.${region}.amazonaws.com/${svc}:${image_tag}"  # set var.image_repo or hardcode
+
+echo " Starting rolling update for ${svc} -> ${image_repo}"
+
+# Ensure kubeconfig refreshed
+aws eks update-kubeconfig --name ${aws_eks_cluster.eks.name} --region ${var.region}
+
+# Do in-place update (Kubernetes handles rolling update)
+kubectl -n default set image deployment/${svc} ${svc}=${image_repo} --record
+
+# Wait for rollout; if it fails, undo the rollout and exit non-zero
+if ! kubectl -n default rollout status deployment/${svc} --timeout=180s; then
+  echo " Rollout failed for ${svc}, performing rollback..."
+  kubectl -n default rollout undo deployment/${svc}
+  exit 1
+fi
+
+echo " Rollout succeeded for ${svc}"
 EOT
   }
 
