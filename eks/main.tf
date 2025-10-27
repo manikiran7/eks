@@ -294,17 +294,28 @@ resource "kubectl_manifest" "deployments" {
   for_each  = local.rendered_deployments
   yaml_body = each.value
 
-  # Wait for deployments to be ready before continuing
-  wait = true
+  wait            = true
   force_conflicts = true
 
+  lifecycle {
+    ignore_changes = [yaml_body]
+  }
+
+  triggers = {
+    image_tag = var.services[each.key].image_tag
+  }
+
+  provisioner "local-exec" {
+    command = <<EOT
+kubectl apply -f <(echo '${each.value}') --namespace default
+EOT
+  }
 
   depends_on = [
-    null_resource.refresh_kubeconfig,   
-    aws_eks_cluster.eks,                
-    aws_eks_fargate_profile.default,    
-    null_resource.wait_for_fargate,    
-    kubernetes_config_map.aws_auth      
+    null_resource.refresh_kubeconfig,
+    aws_eks_cluster.eks,
+    null_resource.wait_for_fargate,
+    kubernetes_config_map.aws_auth
   ]
 }
 
