@@ -325,7 +325,22 @@ resource "kubectl_manifest" "ingress" {
 ###############################################
 # Metrics Server + HPA
 ###############################################
+# 🔍 Check if metrics-server already exists
+# 🔍 Check if metrics-server exists
+data "external" "check_metrics_server" {
+  program = ["bash", "-c", <<EOT
+if helm status metrics-server -n kube-system >/dev/null 2>&1; then
+  echo '{"exists":"true"}'
+else
+  echo '{"exists":"false"}'
+fi
+EOT
+  ]
+}
+
+# 🚀 Create only if missing
 resource "helm_release" "metrics_server" {
+  count      = data.external.check_metrics_server.result.exists == "false" ? 1 : 0
   provider   = helm.eks
   name       = "metrics-server"
   repository = "https://kubernetes-sigs.github.io/metrics-server/"
@@ -337,18 +352,17 @@ resource "helm_release" "metrics_server" {
 
   set_list = [{
     name  = "args"
-     value = ["--kubelet-insecure-tls", "--metric-resolution=15s"]
+    value = ["--kubelet-insecure-tls", "--metric-resolution=15s"]
   }]
-
-  lifecycle {
-    ignore_changes = [set, namespace]
-  }
 
   depends_on = [
     aws_eks_cluster.eks,
-    null_resource.wait_for_eks
+    null_resource.wait_for_api,
+    null_resource.verify_eks_connection,
+    null_resource.refresh_kubeconfig
   ]
 }
+
 
 ###############################################
 # HPA
