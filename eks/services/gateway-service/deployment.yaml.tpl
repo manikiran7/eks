@@ -24,7 +24,7 @@ spec:
             requests:
               cpu: "100m"
               memory: "128Mi"
-             limits:
+            limits:
               cpu: "250m"
               memory: "256Mi"
           env:
