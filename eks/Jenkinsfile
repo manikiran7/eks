@@ -36,11 +36,11 @@ pipeline {
     }
 
     environment {
-        SSH_CRED = 'jenkins'
+        SSH_CRED = 'aws-ec2-key'
         PRIVATE_IP = '10.100.0.175'
         GIT_REPO = 'git@github.com:manikiran7/eks.git'
         GIT_BRANCH = 'main'
-        TF_DIR = '/home/ubuntu/'
+        TF_DIR = '/home/ubuntu/eks/eks'
     }
 
     stages {
@@ -57,7 +57,7 @@ pipeline {
                         set -e
                         if [ ! -d /home/ubuntu/eks/eks ]; then
                             echo "❌ Directory missing, cloning repo..."
-                            git clone -b ${GIT_BRANCH} ${GIT_REPO} /home/ubuntu/
+                            git clone -b ${GIT_BRANCH} ${GIT_REPO} /home/ubuntu/eks
                         fi
 
                         cd /home/ubuntu/eks/eks
@@ -137,7 +137,7 @@ EOT
                         set -e
                         cd ${TF_DIR}
                         terraform init -input=false
-                        terraform destroy -auto-approve
+                        terraform apply -auto-approve
                     "
                     """
                 }
