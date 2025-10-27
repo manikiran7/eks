@@ -53,8 +53,25 @@ resource "null_resource" "wait_for_eks" {
 ###############################################
 # 1.2 AWS Auth ConfigMap (EKS IAM → RBAC)
 ###############################################
+# 🧩 Try to read existing aws-auth ConfigMap
+data "kubernetes_config_map" "aws_auth_existing" {
+  provider = kubernetes.eks
+
+  metadata {
+    name      = "aws-auth"
+    namespace = "kube-system"
+  }
+
+  # Some clusters may not have this yet, so ignore errors
+  # Terraform will handle missing data gracefully in 'try()' below
+}
+
+# ✅ Create aws-auth only if it doesn’t already exist
 resource "kubernetes_config_map" "aws_auth" {
   provider = kubernetes.eks
+
+  # Skip creating if the data lookup above finds it
+  count = length(try(data.kubernetes_config_map.aws_auth_existing.metadata[0].name, "")) > 0 ? 0 : 1
 
   metadata {
     name      = "aws-auth"
@@ -74,16 +91,23 @@ resource "kubernetes_config_map" "aws_auth" {
         groups   = ["system:bootstrappers", "system:nodes"]
       },
       {
-        rolearn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/jenkins-eks-role"
+        rolearn  = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/jenkins-eks-role"
         username = "jenkins"
         groups   = ["system:masters"]
       }
     ])
   }
 
-  depends_on = [null_resource.wait_for_eks,aws_eks_cluster.eks,null_resource.wait_for_api]
-}
+  lifecycle {
+    ignore_changes = [metadata, data]
+  }
 
+  depends_on = [
+    aws_eks_cluster.eks,
+    null_resource.wait_for_eks,
+    null_resource.wait_for_api
+  ]
+}
 
 ###############################################
 # 2. Fargate Pod Execution Role
@@ -553,4 +577,13 @@ EOT
   }
 
   depends_on = [null_resource.wait_for_api]
+}
+
+
+resource "null_resource" "aws_auth_check" {
+  provisioner "local-exec" {
+    command = "echo 'aws-auth already exists, skipping creation...'"
+  }
+
+  count = length(try(data.kubernetes_config_map.aws_auth_existing.metadata[0].name, "")) > 0 ? 1 : 0
 }
