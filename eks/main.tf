@@ -532,16 +532,7 @@ resource "null_resource" "wait_for_fargate" {
   ]
 }
 
-# wait a bit for Fargate pods to start and stabilize after deployments
-resource "null_resource" "wait_for_pods" {
-  provisioner "local-exec" {
-    command = "echo 'Waiting 90s for pods to stabilize...' && sleep 90"
-  }
 
-  depends_on = [
-    kubectl_manifest.deployments
-  ]
-}
 
 # ✅ Wait for the EKS API to become active and reachable
 resource "null_resource" "wait_for_api" {
