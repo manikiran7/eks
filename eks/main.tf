@@ -277,29 +277,43 @@ locals {
 ###############################################
 # Deployments
 ###############################################
+# ✅ Deploy Kubernetes resources safely to EKS
 resource "kubectl_manifest" "deployments" {
   provider  = kubectl.eks
   for_each  = local.rendered_deployments
   yaml_body = each.value
-  wait      = false
 
-    depends_on = [
-    aws_eks_fargate_profile.default,
-    null_resource.wait_for_fargate,
-    kubernetes_config_map.aws_auth
+  # Wait for deployments to be ready before continuing
+  wait = true
+  force_conflicts = true
+
+
+  depends_on = [
+    null_resource.refresh_kubeconfig,   
+    aws_eks_cluster.eks,                
+    aws_eks_fargate_profile.default,    
+    null_resource.wait_for_fargate,    
+    kubernetes_config_map.aws_auth      
   ]
 }
 
 ###############################################
 # Ingress (direct to pods via IP targets)
 ###############################################
+# ✅ Deploy ingress manifests only after deployments are ready
 resource "kubectl_manifest" "ingress" {
   provider  = kubectl.eks
   for_each  = local.rendered_ingress
   yaml_body = each.value
-  wait      = false 
+
+  # Wait until ingress objects are ready
+  wait = true
+  force_conflicts = true
 
   depends_on = [
+    null_resource.refresh_kubeconfig, 
+    kubectl_manifest.deployments,      
+    null_resource.wait_for_pods,      
     aws_eks_fargate_profile.default,
     null_resource.wait_for_fargate,
     kubernetes_config_map.aws_auth
@@ -317,12 +331,18 @@ resource "helm_release" "metrics_server" {
   repository = "https://kubernetes-sigs.github.io/metrics-server/"
   chart      = "metrics-server"
   namespace  = "kube-system"
-
+  create_namespace = false
+  wait             = true
+  timeout          = 300
 
   set_list = [{
     name  = "args"
-    value = ["--kubelet-insecure-tls"]
+     value = ["--kubelet-insecure-tls", "--metric-resolution=15s"]
   }]
+
+  lifecycle {
+    ignore_changes = [set, namespace]
+  }
 
   depends_on = [
     aws_eks_cluster.eks,
@@ -330,6 +350,9 @@ resource "helm_release" "metrics_server" {
   ]
 }
 
+###############################################
+# HPA
+###############################################
 resource "kubectl_manifest" "hpa" {
   provider  = kubectl.eks
   for_each  = local.rendered_hpa
@@ -586,4 +609,50 @@ resource "null_resource" "aws_auth_check" {
   }
 
   count = length(try(data.kubernetes_config_map.aws_auth_existing.metadata[0].name, "")) > 0 ? 1 : 0
+}
+
+
+resource "null_resource" "refresh_kubeconfig" {
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command = <<EOT
+set -e
+echo "🔄 Updating kubeconfig for EKS cluster..."
+aws eks update-kubeconfig --name ${aws_eks_cluster.eks.name} --region ${var.region}
+kubectl get nodes || echo "⚠️ Cluster not ready yet, continuing..."
+EOT
+  }
+
+  depends_on = [
+    aws_eks_cluster.eks,
+    null_resource.wait_for_api,
+    null_resource.verify_eks_connection
+  ]
+}
+
+# ✅ Wait for all pods to become Ready before proceeding
+resource "null_resource" "wait_for_pods" {
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command = <<EOT
+set -e
+echo "⏳ Waiting for all pods to be Ready..."
+for i in $(seq 1 30); do
+  not_ready=$(kubectl get pods -A --no-headers | grep -v Running || true)
+  if [ -z "$not_ready" ]; then
+    echo "✅ All pods are Ready."
+    exit 0
+  fi
+  echo "⌛ Still waiting... ($i/30)"
+  sleep 10
+done
+echo "❌ Timeout waiting for pods." >&2
+exit 1
+EOT
+  }
+
+  depends_on = [
+    kubectl_manifest.deployments,
+    null_resource.refresh_kubeconfig
+  ]
 }
