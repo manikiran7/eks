@@ -1,4 +1,21 @@
 ###############################################
+# PULL VPC OUTPUTS FROM REMOTE STATE (ADDED)
+###############################################
+data "terraform_remote_state" "vpc" {
+  backend = "s3"
+  config = {
+    bucket = "my-terraform-state-prod-manikiran"
+    key    = "vpc/terraform.tfstate"
+    region = "us-east-1"
+  }
+}
+
+locals {
+  vpc_id             = data.terraform_remote_state.vpc.outputs.vpc_id
+  private_subnet_ids = data.terraform_remote_state.vpc.outputs.private_subnet_ids
+  public_subnet_ids  = data.terraform_remote_state.vpc.outputs.public_subnet_ids
+}
+###############################################
 # 1. EKS Cluster (Private Only)
 ###############################################
 resource "aws_iam_role" "eks_cluster_role" {
@@ -29,7 +46,7 @@ resource "aws_eks_cluster" "eks" {
   version  = var.cluster_version
 
   vpc_config {
-    subnet_ids              = var.private_subnet_ids
+    subnet_ids              = local.private_subnet_ids
     endpoint_private_access = true
     endpoint_public_access  = true
   
@@ -53,25 +70,10 @@ resource "null_resource" "wait_for_eks" {
 ###############################################
 # 2 AWS Auth ConfigMap (EKS IAM → RBAC)
 ###############################################
-# 🧩 Try to read existing aws-auth ConfigMap
-data "kubernetes_config_map" "aws_auth_existing" {
-  provider = kubernetes.eks
 
-  metadata {
-    name      = "aws-auth"
-    namespace = "kube-system"
-  }
-
-  # Some clusters may not have this yet, so ignore errors
-  # Terraform will handle missing data gracefully in 'try()' below
-}
-
-# ✅ Create aws-auth only if it doesn’t already exist
 resource "kubernetes_config_map" "aws_auth" {
   provider = kubernetes.eks
 
-  # Skip creating if the data lookup above finds it
-  count = length(try(data.kubernetes_config_map.aws_auth_existing.metadata[0].name, "")) > 0 ? 0 : 1
 
   metadata {
     name      = "aws-auth"
@@ -103,10 +105,9 @@ resource "kubernetes_config_map" "aws_auth" {
   }
 
   depends_on = [
-    aws_eks_cluster.eks,
-    null_resource.wait_for_eks,
-    null_resource.wait_for_api
-  ]
+  null_resource.refresh_kubeconfig
+]
+
 }
 
 ###############################################
@@ -136,7 +137,7 @@ resource "aws_eks_fargate_profile" "default" {
   cluster_name           = aws_eks_cluster.eks.name
   fargate_profile_name   = "${var.name_prefix}-default"
   pod_execution_role_arn = aws_iam_role.fargate_exec_role.arn
-  subnet_ids             = var.private_subnet_ids
+  subnet_ids             = local.private_subnet_ids
 
   selector {
     namespace = "default"
@@ -155,7 +156,7 @@ resource "aws_eks_fargate_profile" "kube_system" {
   cluster_name           = aws_eks_cluster.eks.name
   fargate_profile_name   = "${var.name_prefix}-kube-system"
   pod_execution_role_arn = aws_iam_role.fargate_exec_role.arn
-  subnet_ids             = var.private_subnet_ids
+  subnet_ids             = local.private_subnet_ids
 
   selector {
     namespace = "kube-system"
@@ -185,10 +186,11 @@ resource "aws_eks_fargate_profile" "kube_system" {
 resource "aws_iam_openid_connect_provider" "eks" {
   url             = data.aws_eks_cluster.eks.identity[0].oidc[0].issuer
   client_id_list  = ["sts.amazonaws.com"]
-
-  # ✅ Pre-fetched thumbprint for us-east-1
-  # You got this via `openssl s_client ...`
   thumbprint_list = ["d7d10ac1fd7e87f1a3787a9a8be9b0f8538ec059"]
+    
+  depends_on = [
+    null_resource.wait_for_api   # ✅ ensures cluster API is alive
+  ]
 }
 
 # --------------------------------------------------------------------
@@ -239,10 +241,10 @@ resource "kubernetes_service_account" "alb_sa" {
   automount_service_account_token = true
 
   depends_on = [
-    aws_iam_openid_connect_provider.eks,
-    aws_iam_role.alb_controller,
+    aws_iam_openid_connect_provider.eks,      # OIDC must exist
+    aws_iam_role.alb_controller,              # Role must exist
     aws_iam_role_policy_attachment.alb_controller_policy,
-    null_resource.wait_for_eks
+    null_resource.refresh_kubeconfig          # Ensure kubeconfig is ready
   ]
 }
 
@@ -257,7 +259,7 @@ resource "helm_release" "alb_controller" {
 
   repository = "https://aws.github.io/eks-charts"
   chart      = "aws-load-balancer-controller"
-  version    = "1.9.2" # or latest compatible with your EKS version
+  version    = "1.9.2"
 
   set = [
     {
@@ -278,17 +280,18 @@ resource "helm_release" "alb_controller" {
     },
     {
       name  = "vpcId"
-      value = var.vpc_id
+      value = local.vpc_id
     }
   ]
 
   depends_on = [
-    kubernetes_service_account.alb_sa,
-    aws_iam_role.alb_controller,
+    kubernetes_service_account.alb_sa,          # SA must exist
+    aws_iam_role.alb_controller,                # IAM role exists
     aws_iam_role_policy_attachment.alb_controller_policy,
-    null_resource.wait_for_eks
+    null_resource.refresh_kubeconfig            
   ]
 }
+
 
 ################################################
 # 9. Deploy Services (No Service Object)
@@ -339,44 +342,52 @@ resource "kubectl_manifest" "deployments" {
   wait            = true
   force_conflicts = true
 
-  lifecycle {
-    prevent_destroy = true
-    ignore_changes  = [yaml_body]
-  }
-
   depends_on = [
-    null_resource.refresh_kubeconfig,
-    aws_eks_cluster.eks,
-    null_resource.wait_for_fargate,
-    kubernetes_config_map.aws_auth
+    null_resource.refresh_kubeconfig,  # Kubeconfig + API ready
+    kubernetes_config_map.aws_auth,    # aws-auth RBAC applied
+    null_resource.wait_for_fargate     #  (or node group) ensure nodes exist
   ]
 }
 
 
-###############################################
-# 11 Ingress (direct to pods via IP targets)
-###############################################
-# Deploy ingress manifests only after deployments are ready
-resource "kubectl_manifest" "ingress" {
-  provider  = kubectl.eks
-  for_each  = local.rendered_ingress
-  yaml_body = each.value
 
-  wait            = true
-  force_conflicts = true
 
-  lifecycle {
-    prevent_destroy = true
-    ignore_changes  = [yaml_body]
+###############################################
+# 11 Ingress (create only if missing)
+###############################################
+
+# Detect existing Ingress resources
+# Detect existing ingress resources
+data "kubernetes_ingress" "existing" {
+  for_each = local.rendered_ingress
+
+  metadata {
+    name      = each.key
+    namespace = "default"
   }
 
+  provider = kubernetes.eks
+}
+
+# Create Ingress only if not already present
+resource "kubectl_manifest" "ingress" {
+  provider  = kubectl.eks
+
+  for_each = {
+    for k, v in local.rendered_ingress :
+    k => v if !contains(keys(data.kubernetes_ingress.existing), k)
+  }
+
+  yaml_body = each.value
+  wait      = true
+  force_conflicts = true
+
   depends_on = [
-    null_resource.refresh_kubeconfig, 
-    kubectl_manifest.deployments,      
-    null_resource.wait_for_pods,      
-    aws_eks_fargate_profile.default,
-    null_resource.wait_for_fargate,
-    kubernetes_config_map.aws_auth
+    null_resource.refresh_kubeconfig,    #  kubeconfig + API ready
+    kubernetes_config_map.aws_auth,      #  node auth working
+    kubectl_manifest.deployments,        #  ensure deployments exist
+    null_resource.wait_for_pods,         #  ensure pods are running
+    null_resource.wait_for_fargate       #  only if using Fargate
   ]
 }
 
@@ -415,9 +426,6 @@ resource "helm_release" "metrics_server" {
   }]
 
   depends_on = [
-    aws_eks_cluster.eks,
-    null_resource.wait_for_api,
-    null_resource.verify_eks_connection,
     null_resource.refresh_kubeconfig
   ]
 }
@@ -432,15 +440,12 @@ resource "kubectl_manifest" "hpa" {
   yaml_body = each.value
   wait      = true
 
-  lifecycle {
-    prevent_destroy = true
-    ignore_changes  = [yaml_body]
-  }
-
   depends_on = [
-    null_resource.wait_for_pods,
-    kubectl_manifest.ingress,
-    null_resource.wait_for_fargate
+    null_resource.refresh_kubeconfig,      #  kubeconfig + API ready
+    kubectl_manifest.deployments,          #  target deployments exist
+    kubectl_manifest.ingress,              #  ingress is ready (optional but okay)
+    null_resource.wait_for_fargate,        #  Fargate workloads deployed
+    helm_release.metrics_server            #  Metrics server installed → required for HPA
   ]
 }
 
@@ -516,13 +521,14 @@ resource "helm_release" "cloudwatch_container_insights" {
     { name = "logs.enabled", value = "true" }
   ]
 
- depends_on = [
-  kubectl_manifest.deployments,
-  kubectl_manifest.ingress,
-  null_resource.wait_for_fargate
-]
-
+  depends_on = [
+    null_resource.refresh_kubeconfig,    #  Kubeconfig & API ready
+    kubectl_manifest.deployments,        #  Deployments exist
+    kubectl_manifest.ingress,            #  Ingress created (optional, fine)
+    null_resource.wait_for_fargate       #  If you're using Fargate nodes
+  ]
 }
+
 
 
 
@@ -629,7 +635,7 @@ for i in $(seq 1 10); do
     echo " EKS API reachable."
     exit 0
   fi
-  echo "⏳ Waiting... ($i/10)"
+  echo " Waiting... ($i/5)"
   sleep 10
 done
 
@@ -637,7 +643,7 @@ echo " ERROR: EKS API not reachable after retries!" >&2
 exit 1
 EOT
   }
-  depends_on = [aws_eks_cluster.eks]
+  depends_on = [aws_eks_cluster.eks,null_resource.wait_for_eks]
 }
 
 #  19 Verify EKS connectivity (runs right after wait_for_api)
@@ -653,12 +659,12 @@ endpoint=$(aws eks describe-cluster \
   --output text)
 
 echo " Checking EKS endpoint: $endpoint"
-for i in $(seq 1 10); do
+for i in $(seq 1 5); do
   if curl -sk --connect-timeout 5 "$endpoint"/version > /dev/null; then
     echo " EKS API is reachable."
     exit 0
   fi
-  echo " Waiting for EKS API... ($i/10)"
+  echo " Waiting for EKS API... ($i/5)"
   sleep 10
 done
 
@@ -667,7 +673,7 @@ exit 1
 EOT
   }
 
-  depends_on = [null_resource.wait_for_api]
+  depends_on = [null_resource.wait_for_api,null_resource.wait_for_eks]
 }
 
 # 20 aws auth check 
@@ -687,7 +693,7 @@ resource "null_resource" "refresh_kubeconfig" {
 set -e
 echo " Updating kubeconfig for EKS cluster..."
 aws eks update-kubeconfig --name ${aws_eks_cluster.eks.name} --region ${var.region}
-kubectl get nodes || echo "⚠️ Cluster not ready yet, continuing..."
+kubectl get nodes || echo " Cluster not ready yet, continuing..."
 EOT
   }
 
@@ -700,7 +706,7 @@ EOT
 
 # 21 waiting for pods deploy 
 resource "null_resource" "wait_for_pods" {
-  # Run only when deployments change (prevents tainting/recreation each time)
+  # Run only when deployments change (prevents unnecessary re-runs)
   triggers = {
     deployments_hash = sha1(join(",", keys(kubectl_manifest.deployments)))
   }
@@ -708,24 +714,31 @@ resource "null_resource" "wait_for_pods" {
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<EOT
-set -e Waiting for pods in 'default' namespace to be Ready..."
-for i in $(seq 1 20); do
-  not_ready=$(kubectl get pods -n default --no-headers | grep -v Running || true)
+set -euo pipefail
+echo " Waiting for all pods in 'default' namespace to be Ready..."
+
+for i in $(seq 1 12); do   # 12 attempts = 2 minutes (12 * 10s)
+  # Get pods which are NOT in Running or Completed state
+  not_ready=$(kubectl get pods -n default --no-headers | grep -Ev 'Running|Completed' || true)
+
   if [ -z "$not_ready" ]; then
-    echo " All pods in default namespace are Ready."
+    echo " All pods in 'default' namespace are Ready."
     exit 0
   fi
-  echo "⌛ Still waiting... ($i/20)"
+
+  echo " Still waiting... ($i/12)"
   sleep 10
 done
-echo "Timeout waiting for pods in default namespace." >&2
+
+echo " Timeout: Some pods are not Ready after waiting." >&2
+kubectl get pods -n default
 exit 1
 EOT
   }
 
   depends_on = [
-    kubectl_manifest.deployments,
-    null_resource.refresh_kubeconfig
+    null_resource.refresh_kubeconfig, #  Ensure kubeconfig + API is ready
+    kubectl_manifest.deployments      #  Deployments must be applied first
   ]
 }
 
@@ -734,55 +747,50 @@ resource "null_resource" "apply_image_update" {
   for_each = var.services
 
   triggers = {
-    image_tag = each.value.image_tag
+    image_tag = each.value.image_tag  # re-runs only when image changes
   }
 
   provisioner "local-exec" {
     interpreter = ["/bin/bash", "-c"]
     command = <<EOT
 set -euo pipefail
-svc=${each.key}
-image_tag=${each.value.image_tag}
-# The container name in deployment should match svc (adjust if different)
-image_repo="${account_id}.dkr.ecr.${region}.amazonaws.com/${svc}:${image_tag}"  # set var.image_repo or hardcode
 
-echo " Starting rolling update for ${svc} -> ${image_repo}"
+svc="${each.key}"
+image_tag="${each.value.image_tag}"
+account_id=$(aws sts get-caller-identity --query "Account" --output text)
+region="${var.region}"
+image_repo="$${account_id}.dkr.ecr.$${region}.amazonaws.com/$${svc}:$${image_tag}"
 
-# Ensure kubeconfig refreshed
+echo " Starting rolling update for $${svc} → $${image_repo}"
+
+# Make sure kubeconfig is updated (idempotent)
 aws eks update-kubeconfig --name ${aws_eks_cluster.eks.name} --region ${var.region}
 
-# Do in-place update (Kubernetes handles rolling update)
-kubectl -n default set image deployment/${svc} ${svc}=${image_repo} --record
+# Ensure deployment exists before trying to update
+if ! kubectl get deployment/$${svc} -n default >/dev/null 2>&1; then
+  echo " Deployment $${svc} does not exist in cluster — skipping."
+  exit 0
+fi
 
-# Wait for rollout; if it fails, undo the rollout and exit non-zero
-if ! kubectl -n default rollout status deployment/${svc} --timeout=180s; then
-  echo " Rollout failed for ${svc}, performing rollback..."
-  kubectl -n default rollout undo deployment/${svc}
+# Apply rolling update
+kubectl -n default set image deployment/$${svc} $${svc}=$${image_repo} --record
+
+# Wait for rollout to finish
+if ! kubectl -n default rollout status deployment/$${svc} --timeout=180s; then
+  echo " Rollout failed for $${svc}. Rolling back..."
+  kubectl -n default rollout undo deployment/$${svc}
   exit 1
 fi
 
-echo " Rollout succeeded for ${svc}"
+echo " Rollout succeeded for $${svc}"
 EOT
   }
 
   depends_on = [
-    null_resource.refresh_kubeconfig,
-    kubectl_manifest.deployments
+    null_resource.refresh_kubeconfig,   #  kubeconfig & API ready
+    kubectl_manifest.deployments        #  workloads exist first
+    # Optionally add:
+    # kubectl_manifest.ingress,          #  ingress available
+    # helm_release.metrics_server        #  metrics ready for HPA
   ]
-}
-
-data "kubernetes_ingress" "existing" {
-  for_each = local.rendered_ingress
-  metadata {
-    name      = each.key
-    namespace = "default"
-  }
-  provider = kubernetes.eks
-}
-
-resource "kubectl_manifest" "ingress" {
-  provider  = kubectl.eks
-  for_each  = { for k, v in local.rendered_ingress : k => v if !contains(keys(data.kubernetes_ingress.existing), k) }
-  yaml_body = each.value
-  wait = true
 }

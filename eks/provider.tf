@@ -7,8 +7,6 @@ terraform {
     encrypt        = true
   }
 
-  required_version = ">= 1.2.0"
-
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -29,29 +27,21 @@ terraform {
   }
 }
 
-# --------------------------------------------------------------------
-# AWS Provider
-# --------------------------------------------------------------------
 provider "aws" {
   region = var.region
 }
 
-# --------------------------------------------------------------------
-# EKS Cluster Data Sources (used by Kubernetes / Helm / Kubectl providers)
-# --------------------------------------------------------------------
+#  Read EKS data only after the cluster is created
 data "aws_eks_cluster" "eks" {
   name       = "${var.name_prefix}-eks"
-  depends_on = [null_resource.wait_for_eks, null_resource.verify_eks_connection]
+  depends_on = [aws_eks_cluster.eks]
 }
 
 data "aws_eks_cluster_auth" "eks" {
   name       = data.aws_eks_cluster.eks.name
-  depends_on = [null_resource.wait_for_eks, null_resource.verify_eks_connection]
+  depends_on = [aws_eks_cluster.eks]
 }
 
-# --------------------------------------------------------------------
-# Kubernetes Provider
-# --------------------------------------------------------------------
 provider "kubernetes" {
   alias                  = "eks"
   host                   = data.aws_eks_cluster.eks.endpoint
@@ -59,9 +49,6 @@ provider "kubernetes" {
   token                  = data.aws_eks_cluster_auth.eks.token
 }
 
-# --------------------------------------------------------------------
-# Helm Provider
-# --------------------------------------------------------------------
 provider "helm" {
   alias = "eks"
   kubernetes = {
@@ -71,9 +58,6 @@ provider "helm" {
   }
 }
 
-# --------------------------------------------------------------------
-# Kubectl Provider
-# --------------------------------------------------------------------
 provider "kubectl" {
   alias                  = "eks"
   host                   = data.aws_eks_cluster.eks.endpoint

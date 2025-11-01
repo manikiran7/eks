@@ -10,36 +10,10 @@ variable "region" {
   default     = "us-east-1"
 }
 
-variable "vpc_id" {
-  description = "VPC ID to deploy EKS into"
-  type        = string
-  default     = "vpc-0b479c1e5676f0f2b"
-}
-
-variable "public_subnet_ids" {
-  description = "List of public subnets used for ALB / public resources"
-  type        = list(string)
-  default     = [
-"subnet-0fe58376d1fc5f12b",
-  "subnet-0875aab96db71c461",
-  "subnet-028020ded46c1831c"
-  ]
-}
-
-variable "private_subnet_ids" {
-  description = "List of private subnets used for workloads and pods"
-  type        = list(string)
-  default     = [
-"subnet-0dad95981ac569cbe",
-  "subnet-0e8ceeb56e7a5dc51",
-  "subnet-0e2f77ad18bcf72ca"
-  ]
-}
-
 variable "cluster_version" {
   description = "EKS Kubernetes version"
   type        = string
-  default     = "1.33"
+  default     = "1.29" 
 }
 
 variable "services" {
