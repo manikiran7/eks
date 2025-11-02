@@ -74,7 +74,6 @@ resource "null_resource" "wait_for_eks" {
 resource "kubernetes_config_map" "aws_auth" {
   provider = kubernetes.eks
 
-
   metadata {
     name      = "aws-auth"
     namespace = "kube-system"
@@ -93,7 +92,7 @@ resource "kubernetes_config_map" "aws_auth" {
         groups   = ["system:bootstrappers", "system:nodes"]
       },
       {
-        rolearn  = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/jenkins-eks-role"
+        rolearn  = format("arn:aws:iam::%s:role/jenkins-eks-role", data.aws_caller_identity.current.account_id)
         username = "jenkins"
         groups   = ["system:masters"]
       }
@@ -105,10 +104,10 @@ resource "kubernetes_config_map" "aws_auth" {
   }
 
   depends_on = [
-  null_resource.refresh_kubeconfig
-]
-
+    null_resource.refresh_kubeconfig
+  ]
 }
+
 
 ###############################################
 # 3. Fargate Pod Execution Role
@@ -189,7 +188,7 @@ resource "aws_iam_openid_connect_provider" "eks" {
   thumbprint_list = ["d7d10ac1fd7e87f1a3787a9a8be9b0f8538ec059"]
     
   depends_on = [
-    null_resource.wait_for_api   # ✅ ensures cluster API is alive
+    null_resource.wait_for_api   #  ensures cluster API is alive
   ]
 }
 
@@ -355,9 +354,7 @@ resource "kubectl_manifest" "deployments" {
 ###############################################
 # 11 Ingress (create only if missing)
 ###############################################
-
-# Detect existing Ingress resources
-# Detect existing ingress resources
+# Check if Ingress already exists (only AFTER kubeconfig is ready)
 data "kubernetes_ingress" "existing" {
   for_each = local.rendered_ingress
 
@@ -367,15 +364,21 @@ data "kubernetes_ingress" "existing" {
   }
 
   provider = kubernetes.eks
+
+  depends_on = [
+    null_resource.refresh_kubeconfig,   # ✅ kubeconfig updated
+    null_resource.wait_for_api,         # ✅ EKS API online
+    kubernetes_config_map.aws_auth      # ✅ AWS IAM → Kubernetes auth applied
+  ]
 }
 
-# Create Ingress only if not already present
+# Create missing Ingress resources
 resource "kubectl_manifest" "ingress" {
   provider  = kubectl.eks
 
   for_each = {
     for k, v in local.rendered_ingress :
-    k => v if !contains(keys(data.kubernetes_ingress.existing), k)
+    k => v if !contains(try(keys(data.kubernetes_ingress.existing), []), k)
   }
 
   yaml_body = each.value
@@ -383,13 +386,14 @@ resource "kubectl_manifest" "ingress" {
   force_conflicts = true
 
   depends_on = [
-    null_resource.refresh_kubeconfig,    #  kubeconfig + API ready
-    kubernetes_config_map.aws_auth,      #  node auth working
-    kubectl_manifest.deployments,        #  ensure deployments exist
-    null_resource.wait_for_pods,         #  ensure pods are running
-    null_resource.wait_for_fargate       #  only if using Fargate
+    null_resource.refresh_kubeconfig,     # ✅ kubeconfig ready
+    kubernetes_config_map.aws_auth,       # ✅ proper IAM auth
+    kubectl_manifest.deployments,         # ✅ services deployed
+    null_resource.wait_for_pods,          # ✅ pods are running
+    null_resource.wait_for_fargate        # ✅ Fargate/OIDC propagation
   ]
 }
+
 
 
 
@@ -428,6 +432,11 @@ resource "helm_release" "metrics_server" {
   depends_on = [
     null_resource.refresh_kubeconfig
   ]
+
+
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
 
@@ -593,12 +602,20 @@ resource "aws_cloudwatch_dashboard" "eks_services_dashboard" {
 ###############################################
 # 17. Security Group Rule — Allow HTTPS to EKS
 ###############################################
+data "aws_security_group" "jenkins_sg" {
+  filter {
+    name   = "group-name"
+    values = ["jenkins-eks-sg"] # Your private Jenkins instance SG
+  }
+}
+
+
 resource "aws_security_group_rule" "allow_https_to_eks" {
   type                     = "ingress"
   from_port                = 443
   to_port                  = 443
   protocol                 = "tcp"
- source_security_group_id = "sg-099263263e2326f88" 
+ source_security_group_id = data.aws_security_group.jenkins_sg.id
  security_group_id        = aws_eks_cluster.eks.vpc_config[0].cluster_security_group_id
  description              = "Allow HTTPS from Jenkins EC2 SG to EKS Control Plane"
  depends_on               = [aws_eks_cluster.eks]
@@ -635,7 +652,7 @@ for i in $(seq 1 10); do
     echo " EKS API reachable."
     exit 0
   fi
-  echo " Waiting... ($i/5)"
+  echo " Waiting... ($i/10)"
   sleep 10
 done
 
@@ -659,12 +676,12 @@ endpoint=$(aws eks describe-cluster \
   --output text)
 
 echo " Checking EKS endpoint: $endpoint"
-for i in $(seq 1 5); do
+for i in $(seq 1 10); do
   if curl -sk --connect-timeout 5 "$endpoint"/version > /dev/null; then
     echo " EKS API is reachable."
     exit 0
   fi
-  echo " Waiting for EKS API... ($i/5)"
+  echo " Waiting for EKS API... ($i/10)"
   sleep 10
 done
 
@@ -677,14 +694,6 @@ EOT
 }
 
 # 20 aws auth check 
-resource "null_resource" "aws_auth_check" {
-  provisioner "local-exec" {
-    command = "echo 'aws-auth already exists, skipping creation...'"
-  }
-
-  count = length(try(data.kubernetes_config_map.aws_auth_existing.metadata[0].name, "")) > 0 ? 1 : 0
-}
-
 
 resource "null_resource" "refresh_kubeconfig" {
   provisioner "local-exec" {
@@ -792,5 +801,75 @@ EOT
     # Optionally add:
     # kubectl_manifest.ingress,          #  ingress available
     # helm_release.metrics_server        #  metrics ready for HPA
+  ]
+}
+
+#23 patching CoreDNS for Fargate compatibility
+resource "null_resource" "patch_coredns_for_fargate" {
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command = <<-EOT
+      set -euo pipefail
+
+      echo " Checking if EKS API is reachable..."
+
+      # Wait until API responds (5 tries × 10 seconds = 50s max)
+      for i in $(seq 1 5); do
+        if kubectl get nodes >/dev/null 2>&1; then
+          echo " EKS API is ready. Applying CoreDNS patch..."
+          break
+        fi
+        echo " Still waiting for API... ($i/5)"
+        sleep 10
+      done
+
+      # If API is still not ready → skip but do not fail Terraform
+      if ! kubectl get nodes >/dev/null 2>&1; then
+        echo " Skipping CoreDNS patch — API unavailable."
+        exit 0
+      fi
+
+      # Remove nodeSelector/tolerations from CoreDNS so it can run on Fargate
+      kubectl -n kube-system patch deployment coredns \
+        --type json \
+        -p='[
+          {"op": "remove", "path": "/spec/template/spec/nodeSelector"},
+          {"op": "remove", "path": "/spec/template/spec/tolerations"}
+        ]' || echo " CoreDNS already patched or not found — skipping."
+
+      kubectl rollout restart deployment coredns -n kube-system || true
+      echo " CoreDNS patched successfully."
+    EOT
+  }
+
+  depends_on = [
+    null_resource.refresh_kubeconfig,
+    aws_eks_fargate_profile.kube_system,
+    null_resource.wait_for_fargate
+  ]
+}
+
+ # 24 deploy service 
+
+ # Render Service YAMLs from template
+locals {
+  rendered_services = {
+    for svc_name, svc in var.services :
+    svc_name => templatefile("${path.module}/services/${svc_name}/service.yaml.tpl", {
+      name_prefix  = var.name_prefix
+      service_name = svc_name
+      port         = svc.port
+    })
+  }
+}
+
+resource "kubectl_manifest" "services" {
+  for_each  = local.rendered_services
+  provider  = kubectl.eks
+  yaml_body = each.value
+  wait      = true
+
+  depends_on = [
+    null_resource.refresh_kubeconfig
   ]
 }
