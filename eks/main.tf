@@ -317,16 +317,6 @@ locals {
       replicas     = meta.replicas
     })
   }
-
-  rendered_ingress = {
-    for svc, meta in var.services :
-    svc => templatefile("${path.module}/services/${svc}/ingress.yaml.tpl", {
-      service_name = svc
-      port         = meta.port
-      path         = meta.path
-      name_prefix  = var.name_prefix
-    })
-  }
 }
 
 ###############################################
@@ -354,45 +344,33 @@ resource "kubectl_manifest" "deployments" {
 ###############################################
 # 11 Ingress (create only if missing)
 ###############################################
-# Check if Ingress already exists (only AFTER kubeconfig is ready)
-data "kubernetes_ingress" "existing" {
-  for_each = local.rendered_ingress
-
-  metadata {
-    name      = each.key
-    namespace = "default"
+#  1. Read ingress YAML files from each service folder
+locals {
+  rendered_ingress = {
+    for svc_name, svc in var.services :
+    svc_name => templatefile("${path.module}/services/${svc_name}/ingress.yaml.tpl", {
+      name_prefix  = var.name_prefix
+      service_name = svc_name
+      path         = svc.path
+      port         = svc.port
+    })
   }
-
-  provider = kubernetes.eks
-
-  depends_on = [
-    null_resource.refresh_kubeconfig,   # ✅ kubeconfig updated
-    null_resource.wait_for_api,         # ✅ EKS API online
-    kubernetes_config_map.aws_auth      # ✅ AWS IAM → Kubernetes auth applied
-  ]
 }
 
-# Create missing Ingress resources
+# 2. Apply ingress only (no filtering logic here if you don’t want it)
 resource "kubectl_manifest" "ingress" {
+  for_each  = local.rendered_ingress
   provider  = kubectl.eks
-
-  for_each = {
-    for k, v in local.rendered_ingress :
-    k => v if !contains(try(keys(data.kubernetes_ingress.existing), []), k)
-  }
-
   yaml_body = each.value
   wait      = true
-  force_conflicts = true
 
   depends_on = [
-    null_resource.refresh_kubeconfig,     # ✅ kubeconfig ready
-    kubernetes_config_map.aws_auth,       # ✅ proper IAM auth
-    kubectl_manifest.deployments,         # ✅ services deployed
-    null_resource.wait_for_pods,          # ✅ pods are running
-    null_resource.wait_for_fargate        # ✅ Fargate/OIDC propagation
+    kubectl_manifest.services,        # services must be created
+    null_resource.refresh_kubeconfig, # kubeconfig configured
+    null_resource.wait_for_pods       # workloads up
   ]
 }
+
 
 
 
